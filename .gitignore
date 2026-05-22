@@ -1,0 +1,12 @@
+node_modules/
+.next/
+out/
+.env
+.env.local
+.env*.local
+*.db
+*.db-journal
+prisma/envoy.db*
+.vercel
+.DS_Store
+*.log

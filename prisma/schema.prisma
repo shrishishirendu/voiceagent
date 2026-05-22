@@ -1,0 +1,35 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"    
+  url      = env("DATABASE_URL")
+}
+
+model Call {
+  id              String   @id @default(cuid())
+
+  // Brief (set by user before dispatch)
+  contactName     String
+  toNumber        String
+  objective       String
+  voice           String   @default("marcus")
+  manner          String   @default("warm")
+
+  // Vapi state
+  vapiCallId      String?  @unique
+  status          String   @default("dispatching") // dispatching | ringing | in-progress | completed | failed
+  outcome         String?  // success | partial | failed | no-answer
+
+  // Results (filled after call ends)
+  durationSec     Int?
+  endedReason     String?
+  result          String?
+  summary         String?
+  transcript      String?  // JSON string of [{who, text}]
+  recordingUrl    String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
