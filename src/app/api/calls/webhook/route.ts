@@ -36,9 +36,6 @@ interface VapiMessage {
   };
 }
 
-interface VapiWebhookBody {
-  message: VapiMessage;
-}
 
 function deriveOutcome(endedReason?: string, successEval?: string): string {
   if (successEval) {
@@ -67,34 +64,57 @@ function formatTranscript(messages?: VapiMessage["messages"]): string {
 }
 
 export async function POST(req: NextRequest) {
-  let body: VapiWebhookBody;
+  let rawBody: Record<string, unknown>;
   try {
-    body = (await req.json()) as VapiWebhookBody;
+    rawBody = (await req.json()) as Record<string, unknown>;
   } catch {
     return NextResponse.json({ ok: false, error: "Invalid JSON" }, { status: 400 });
   }
 
-  const msg = body?.message;
-  if (!msg || !msg.call?.id) {
+  // Full payload dump — remove once webhook processing is confirmed working
+  console.log("[webhook] raw:", JSON.stringify(rawBody).slice(0, 800));
+
+  // Vapi sends events either wrapped as { message: {...} } or as the event object at the root.
+  // Handle both formats so the handler works regardless of which Vapi uses.
+  const msg = (rawBody?.message ?? rawBody) as VapiMessage;
+  console.log("[webhook] type=%s callId=%s", msg?.type ?? "(none)", msg?.call?.id ?? "(none)");
+
+  if (!msg?.call?.id) {
+    console.log("[webhook] ignored – no call id. Root keys:", Object.keys(rawBody ?? {}));
     return NextResponse.json({ ok: true, ignored: "no call id" });
   }
 
   const vapiCallId = msg.call.id;
 
   // Find our local call record
-  const call = await prisma.call.findUnique({ where: { vapiCallId } });
+  let call;
+  try {
+    call = await prisma.call.findUnique({ where: { vapiCallId } });
+  } catch (err) {
+    console.error("[webhook] findUnique failed", err);
+    return NextResponse.json({ ok: false, error: "db error" }, { status: 500 });
+  }
   if (!call) {
-    // Vapi might fire webhooks before our DB write commits; just acknowledge
+    console.log("[webhook] call not found for vapiCallId:", vapiCallId);
     return NextResponse.json({ ok: true, ignored: "call not found yet" });
   }
 
   switch (msg.type) {
     case "status-update": {
-      const status = msg.status ?? msg.call.status ?? "in-progress";
-      await prisma.call.update({
-        where: { id: call.id },
-        data: { status },
-      });
+      const rawStatus = msg.status ?? msg.call?.status ?? "in-progress";
+      // "ended" is Vapi's transitional state just before end-of-call-report fires.
+      // Skip writing it — keep DB at "in-progress" so the Live screen stays active
+      // until end-of-call-report sets status to "completed" with transcript/summary.
+      if (rawStatus === "ended") break;
+      try {
+        await prisma.call.update({
+          where: { id: call.id },
+          data: { status: rawStatus },
+        });
+      } catch (err) {
+        console.error("[webhook] status-update DB write failed", err);
+        return NextResponse.json({ ok: false, error: "db error" }, { status: 500 });
+      }
       break;
     }
 
@@ -104,26 +124,34 @@ export async function POST(req: NextRequest) {
       const recordingUrl = msg.artifact?.recordingUrl ?? msg.recordingUrl ?? null;
       const durationSec = msg.durationSeconds ?? null;
       const endedReason = msg.endedReason ?? null;
-      const outcome = deriveOutcome(endedReason, msg.analysis?.successEvaluation);
+      const outcome = deriveOutcome(
+        endedReason ?? undefined,
+        msg.analysis?.successEvaluation
+      );
 
       // Try to extract a one-line "result" from the summary
       const result = summary
         ? summary.split(/[.\n]/).find((s) => s.trim().length > 10)?.trim() ?? null
         : null;
 
-      await prisma.call.update({
-        where: { id: call.id },
-        data: {
-          status: "completed",
-          outcome,
-          summary,
-          transcript,
-          recordingUrl,
-          durationSec,
-          endedReason,
-          result,
-        },
-      });
+      try {
+        await prisma.call.update({
+          where: { id: call.id },
+          data: {
+            status: "completed",
+            outcome,
+            summary,
+            transcript,
+            recordingUrl,
+            durationSec,
+            endedReason,
+            result,
+          },
+        });
+      } catch (err) {
+        console.error("[webhook] end-of-call-report DB write failed", err);
+        return NextResponse.json({ ok: false, error: "db error" }, { status: 500 });
+      }
       break;
     }
 

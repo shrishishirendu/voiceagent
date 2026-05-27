@@ -10,6 +10,13 @@ const BriefSchema = z.object({
   voice: z.enum(["marcus", "iris", "theo"]).default("marcus"),
   manner: z.enum(["warm", "crisp", "formal"]).default("warm"),
   userName: z.string().min(1).max(60).default("the caller"),
+  invoiceNumber: z.string().optional(),
+  invoiceDate: z.string().optional(),
+  dueDate: z.string().optional(),
+  amountDue: z.number().optional(),
+  currency: z.string().optional(),
+  lineItems: z.string().optional(),
+  invoiceNotes: z.string().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -28,7 +35,21 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { contactName, toNumber, objective, voice, manner, userName } = parsed.data;
+  const {
+    contactName,
+    toNumber,
+    objective,
+    voice,
+    manner,
+    userName,
+    invoiceNumber,
+    invoiceDate,
+    dueDate,
+    amountDue,
+    currency,
+    lineItems,
+    invoiceNotes,
+  } = parsed.data;
   const normalisedNumber = toNumber.replace(/[ \-()]/g, "");
 
   // Required env
@@ -54,6 +75,13 @@ export async function POST(req: NextRequest) {
       objective,
       voice,
       manner,
+      invoiceNumber,
+      invoiceDate,
+      dueDate,
+      amountDue,
+      currency,
+      lineItems,
+      invoiceNotes,
       status: "dispatching",
     },
   });
@@ -67,6 +95,13 @@ export async function POST(req: NextRequest) {
       voice,
       manner,
       userName,
+      invoiceNumber,
+      invoiceDate,
+      dueDate,
+      amountDue,
+      currency,
+      lineItems,
+      invoiceNotes,
       twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER!,
       twilioAccountSid: process.env.TWILIO_ACCOUNT_SID!,
       twilioAuthToken: process.env.TWILIO_AUTH_TOKEN!,

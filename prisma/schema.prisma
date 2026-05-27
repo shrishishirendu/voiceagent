@@ -16,6 +16,13 @@ model Call {
   objective       String
   voice           String   @default("marcus")
   manner          String   @default("warm")
+  invoiceNumber   String?
+  invoiceDate     String?
+  dueDate         String?
+  amountDue       Float?
+  currency        String?
+  lineItems       String?  // JSON string
+  invoiceNotes    String?
 
   // Vapi state
   vapiCallId      String?  @unique

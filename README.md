@@ -1,6 +1,6 @@
 # Envoy
 
-AI agent that places phone calls on your behalf. Built on Next.js + Vapi + Twilio + Claude.
+AI agent that places phone calls on your behalf. Built on Next.js + Vapi + Twilio + Claude + Gemini.
 
 ## What you need before starting
 
@@ -8,7 +8,8 @@ You should already have:
 - ✅ A Vapi account with a **private API key**
 - ✅ A Twilio account with **Account SID**, **Auth Token**, and a **phone number** (+1 815 283 5864 if you're following along)
 - ✅ Your own mobile **verified as a Caller ID in Twilio** (required for trial accounts)
-- ✅ An **Anthropic API key** from console.anthropic.com (for Claude — Vapi forwards LLM calls to Anthropic)
+- ✅ An **Anthropic API key** from console.anthropic.com (for Claude — Vapi forwards call LLM requests to Anthropic)
+- ✅ A **Google Gemini API key** from aistudio.google.com (for invoice PDF parsing)
 - ✅ Node.js 18+ installed (`node --version` to check)
 
 ## 1. Install
@@ -34,6 +35,7 @@ TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_PHONE_NUMBER=+18152835864
 ANTHROPIC_API_KEY=sk-ant-...
+GEMINI_API_KEY=    # from aistudio.google.com → API Keys
 PUBLIC_URL=        # leave blank for now, we'll set this in step 4
 DATABASE_URL="file:./envoy.db"
 ```
@@ -108,6 +110,7 @@ Open **http://localhost:3000** in your browser. You should see Envoy with no cal
 | Phone rings but call drops immediately | Vapi can't reach Twilio — check Twilio SID/Auth Token |
 | Call connects but no AI voice | Anthropic key invalid, OR ElevenLabs voice ID issue (check `src/lib/vapi.ts`) |
 | Call completes but no summary | Webhook not reaching your machine. Verify `PUBLIC_URL` matches your live ngrok URL, and ngrok is still running |
+| Invoice parsing fails | `GEMINI_API_KEY` missing or invalid — check aistudio.google.com |
 | ngrok shows "tunnel offline" | Restart it. Free tier is sometimes flaky. |
 
 ## File map

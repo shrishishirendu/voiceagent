@@ -41,6 +41,13 @@ interface BuildSystemPromptArgs {
   contactName: string;
   objective: string;
   manner: Manner;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  dueDate?: string;
+  amountDue?: number;
+  currency?: string;
+  lineItems?: string;
+  invoiceNotes?: string;
 }
 
 /**
@@ -48,7 +55,19 @@ interface BuildSystemPromptArgs {
  * Tweak this prompt to change how Envoy behaves on calls.
  */
 export function buildSystemPrompt(args: BuildSystemPromptArgs): string {
-  const { userName, contactName, objective, manner } = args;
+  const {
+    userName,
+    contactName,
+    objective,
+    manner,
+    invoiceNumber,
+    invoiceDate,
+    dueDate,
+    amountDue,
+    currency,
+    lineItems,
+    invoiceNotes,
+  } = args;
 
   return `You are Envoy, a polite AI agent placing a phone call on behalf of ${userName}. You're calling ${contactName}.
 
@@ -68,14 +87,23 @@ ${MANNER_GUIDANCE[manner]}
 - Never make commitments on behalf of ${userName} beyond what's explicitly in the objective. If asked something you can't decide, defer: "I'll need to check with them and get back to you."
 
 # Ending the call
-When the objective is resolved (success OR a clear no), say goodbye naturally and end the call. Don't drag it out.
+When the objective is resolved (success OR a clear no), say a natural farewell (e.g. "Great, I'll let you go — goodbye!") then immediately use the endCall function to hang up. Don't wait for the other person to hang up first. Don't drag it out.
 
 # Opening line
-Start the call with: "Hi, this is Envoy calling on behalf of ${userName}. ${
-    objective.length < 100
-      ? `They're hoping to ${objective.toLowerCase().replace(/^to /, "")}.`
-      : "I'm calling about something they'd like sorted — can I run you through it?"
-  } Is now an okay time?"`;
+Your opening line has already been delivered: "Hi, this is Envoy calling on behalf of ${userName}. Is now an okay time for a quick chat?" Once they confirm, briefly state the purpose of the call in plain terms — do not repeat the greeting.${
+    invoiceNumber
+      ? `
+
+# Invoice details
+Invoice number: ${invoiceNumber}
+Do not proactively state the invoice number to the contact. Refer to it as "the invoice" or "your invoice". Only read out the invoice number if the contact explicitly asks for it.
+Invoice date: ${invoiceDate ?? "not specified"}
+Due date: ${dueDate ?? "not specified"}
+Amount due: ${currency ?? ""} ${amountDue ?? "not specified"}
+${lineItems ? `Line items: ${lineItems}` : ""}
+${invoiceNotes ? `Notes: ${invoiceNotes}` : ""}`
+      : ""
+  }`;
 }
 
 interface CreateCallArgs {
@@ -85,6 +113,13 @@ interface CreateCallArgs {
   voice: VoiceId;
   manner: Manner;
   userName: string;
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  dueDate?: string;
+  amountDue?: number;
+  currency?: string;
+  lineItems?: string;
+  invoiceNotes?: string;
   twilioPhoneNumber: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
@@ -109,6 +144,13 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
     contactName: args.contactName,
     objective: args.objective,
     manner: args.manner,
+    invoiceNumber: args.invoiceNumber,
+    invoiceDate: args.invoiceDate,
+    dueDate: args.dueDate,
+    amountDue: args.amountDue,
+    currency: args.currency,
+    lineItems: args.lineItems,
+    invoiceNotes: args.invoiceNotes,
   });
 
   // Vapi accepts a transient assistant inline — no need to pre-create one
@@ -144,8 +186,6 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
             content: systemPrompt,
           },
         ],
-        // Pass your Anthropic key through — Vapi forwards LLM calls to Anthropic on your behalf
-        // (If you don't pass this, Vapi bills you for LLM usage at their markup. With key, you pay Anthropic direct.)
       },
       // Text-to-speech
       voice: {
@@ -155,6 +195,7 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
       // Behaviour
       maxDurationSeconds: 600, // 10 min hard cap
       silenceTimeoutSeconds: 30,
+      endCallFunctionEnabled: true,
       endCallPhrases: ["goodbye", "talk to you later", "bye now", "have a good one"],
       // Webhook target
       server: {

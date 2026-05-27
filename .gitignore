@@ -10,3 +10,5 @@ prisma/envoy.db*
 .vercel
 .DS_Store
 *.log
+CLAUDE.md
+
