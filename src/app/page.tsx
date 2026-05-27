@@ -28,6 +28,7 @@ interface Call {
 }
 
 interface InvoiceParseResult {
+  vendorName?: string | null;
   contactName: string | null;
   toNumber: string | null;
   invoiceNumber: string | null;
@@ -514,6 +515,7 @@ function InvoiceCompose({
     const nextInvoiceNumber = parsed.invoiceNumber ?? "";
     setContact(parsed.contactName ?? "");
     setNumber(parsed.toNumber ?? "+61 ");
+    if (parsed.vendorName) setUserName(parsed.vendorName);
     setInvoiceNumber(nextInvoiceNumber);
     setInvoiceDate(parsed.invoiceDate ?? "");
     setDueDate(parsed.dueDate ?? "");
@@ -523,7 +525,10 @@ function InvoiceCompose({
     setInvoiceNotes(parsed.invoiceNotes ?? "");
     const objParts: string[] = ["Follow up on payment for invoice"];
     if (nextInvoiceNumber) objParts.push(nextInvoiceNumber);
-    if (parsed.amountDue != null && parsed.currency) objParts.push(`(${parsed.currency} ${parsed.amountDue} outstanding)`);
+    if (parsed.amountDue != null) {
+      const amtStr = parsed.currency ? `${parsed.currency} ${parsed.amountDue}` : String(parsed.amountDue);
+      objParts.push(`(${amtStr} outstanding)`);
+    }
     if (parsed.dueDate) objParts.push(`— due ${parsed.dueDate}`);
     objParts.push(". Confirm whether payment has been made or is scheduled. If overdue, politely arrange a settlement date or payment plan.");
     setObjective(objParts.join(" "));

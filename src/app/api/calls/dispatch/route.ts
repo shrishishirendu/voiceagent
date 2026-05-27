@@ -61,30 +61,37 @@ export async function POST(req: NextRequest) {
   if (!process.env.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY");
   if (!process.env.PUBLIC_URL) missing.push("PUBLIC_URL");
   if (missing.length) {
+    console.error("[dispatch] missing env vars:", missing.join(", "));
     return NextResponse.json(
-      { error: `Missing env vars: ${missing.join(", ")}. Check .env file.` },
+      { error: "Server configuration error. Contact the administrator." },
       { status: 500 }
     );
   }
 
   // 1. Save the brief to DB first, so we have a row even if Vapi fails
-  const call = await prisma.call.create({
-    data: {
-      contactName,
-      toNumber: normalisedNumber,
-      objective,
-      voice,
-      manner,
-      invoiceNumber,
-      invoiceDate,
-      dueDate,
-      amountDue,
-      currency,
-      lineItems,
-      invoiceNotes,
-      status: "dispatching",
-    },
-  });
+  let call;
+  try {
+    call = await prisma.call.create({
+      data: {
+        contactName,
+        toNumber: normalisedNumber,
+        objective,
+        voice,
+        manner,
+        invoiceNumber,
+        invoiceDate,
+        dueDate,
+        amountDue,
+        currency,
+        lineItems,
+        invoiceNotes,
+        status: "dispatching",
+      },
+    });
+  } catch (err) {
+    console.error("[dispatch] failed to create call record:", err);
+    return NextResponse.json({ error: "Failed to create call record" }, { status: 500 });
+  }
 
   // 2. Dispatch via Vapi
   try {

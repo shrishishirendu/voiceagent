@@ -103,7 +103,7 @@ export async function GET(
     result: call.result,
     summary: call.summary,
     durationSec: call.durationSec,
-    transcript: call.transcript ? JSON.parse(call.transcript) : [],
+    transcript: (() => { try { return call.transcript ? JSON.parse(call.transcript) : []; } catch { return []; } })(),
     recordingUrl: call.recordingUrl,
     endedReason: call.endedReason,
     createdAt: call.createdAt,

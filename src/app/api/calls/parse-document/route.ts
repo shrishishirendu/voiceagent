@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
-const EXTRACTION_PROMPT = `You are extracting information from a business invoice to pre-fill a call brief. We sent this invoice to a client and are calling them to chase payment.
+const EXTRACTION_PROMPT = `You are extracting information from a business invoice to pre-fill a call brief. We sent this invoice to a client and are calling them to chase payment. This invoice may span multiple pages — scan all pages before responding.
 
 Return ONLY a valid JSON object with exactly these fields, no other text, no markdown, no code fences:
 {
+  "vendorName": "the company or person who issued this invoice (the sender)",
   "contactName": "the client name or business name we are calling",
   "toNumber": "client phone number in international format e.g. +61412345678",
   "invoiceNumber": "invoice reference number e.g. INV-001",
@@ -33,6 +34,7 @@ const LineItemSchema = z.object({
 });
 
 const ParsedInvoiceSchema = z.object({
+  vendorName: z.string().nullable(),
   contactName: z.string().nullable(),
   toNumber: z.string().nullable(),
   invoiceNumber: z.string().nullable(),
@@ -58,6 +60,7 @@ const GeminiResponseSchema = z.object({
 
 function normaliseParsedInvoice(parsed: ParsedInvoice) {
   return {
+    vendorName: parsed.vendorName,
     contactName: parsed.contactName,
     toNumber: parsed.toNumber,
     invoiceNumber: parsed.invoiceNumber,
@@ -96,6 +99,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Document must be a PDF" }, { status: 400 });
   }
 
+  const MAX_PDF_BYTES = 20 * 1024 * 1024; // 20 MB
+  if (file.size > MAX_PDF_BYTES) {
+    return NextResponse.json({ error: "PDF must be under 20 MB" }, { status: 413 });
+  }
+
   let base64Document: string;
   try {
     const arrayBuffer = await file.arrayBuffer();
@@ -107,10 +115,13 @@ export async function POST(req: NextRequest) {
   let geminiResponse: Response;
   try {
     geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": process.env.GEMINI_API_KEY!,
+        },
         body: JSON.stringify({
           contents: [
             {
@@ -125,7 +136,7 @@ export async function POST(req: NextRequest) {
               ],
             },
           ],
-          generationConfig: { maxOutputTokens: 1200, temperature: 0 },
+          generationConfig: { maxOutputTokens: 4096, temperature: 0 },
         }),
       }
     );
@@ -136,8 +147,9 @@ export async function POST(req: NextRequest) {
 
   if (!geminiResponse.ok) {
     const errorText = await geminiResponse.text();
+    console.error("[parse-document] Gemini error:", geminiResponse.status, errorText);
     return NextResponse.json(
-      { error: `Gemini request failed: ${geminiResponse.status} ${errorText}` },
+      { error: "Document parsing failed — please try again" },
       { status: 502 }
     );
   }

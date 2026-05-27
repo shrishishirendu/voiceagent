@@ -36,6 +36,30 @@ const MANNER_GUIDANCE: Record<Manner, string> = {
     "Be professional and precise. Use complete sentences. Avoid contractions and filler words.",
 };
 
+function formatLineItems(lineItems: string, currency: string): string {
+  try {
+    const items = JSON.parse(lineItems);
+    if (!Array.isArray(items)) return `Line items: ${lineItems}`;
+    const curr = currency ? `${currency} ` : "";
+    const lines = items.map((item: {
+      description?: string | null;
+      quantity?: number | null;
+      unitPrice?: number | null;
+      amount?: number | null;
+    }) => {
+      const label = item.description ?? "Item";
+      const details: string[] = [];
+      if (item.quantity != null) details.push(`${item.quantity} units`);
+      if (item.unitPrice != null) details.push(`${curr}${item.unitPrice.toFixed(2)}/unit`);
+      if (item.amount != null) details.push(`${curr}${item.amount.toFixed(2)} total`);
+      return `- ${label}: ${details.join(", ")}`;
+    });
+    return `Line items:\n${lines.join("\n")}`;
+  } catch {
+    return `Line items: ${lineItems}`;
+  }
+}
+
 interface BuildSystemPromptArgs {
   userName: string;
   contactName: string;
@@ -81,10 +105,14 @@ ${MANNER_GUIDANCE[manner]}
 - You ARE an AI agent. If asked directly whether you're a person or AI, say "I'm an AI agent calling on behalf of ${userName}." Don't volunteer it unprompted unless local law requires it.
 - Speak naturally. You are on a real phone call — no markdown, no lists, no formal headers, just spoken sentences. Use commas and pauses, not bullets.
 - Keep your turns short (1-2 sentences) unless explaining something complex. Let the other person talk.
+- If the contact starts speaking while you are talking, stop immediately and let them finish. Never talk over them.
 - If the other person asks you something you don't know about ${userName}, say honestly: "I don't have that detail — I can check with them and have them call back. Would that work?"
 - If you achieve the objective, confirm the result clearly back to them ("So just to confirm, that's Tuesday the 19th at 2:30pm — perfect, thank you."), then politely end the call.
 - If you can't achieve the objective (closed, no availability, wrong number, etc.), say so honestly and end the call politely.
 - Never make commitments on behalf of ${userName} beyond what's explicitly in the objective. If asked something you can't decide, defer: "I'll need to check with them and get back to you."
+
+# Date context
+Today is ${new Date().toISOString().split("T")[0]}. When the invoice is overdue (due date is before today), acknowledge it is overdue and focus on arranging a future payment date. All suggested settlement dates or payment plan start dates must be after today.
 
 # Ending the call
 When the objective is resolved (success OR a clear no), say a natural farewell (e.g. "Great, I'll let you go — goodbye!") then immediately use the endCall function to hang up. Don't wait for the other person to hang up first. Don't drag it out.
@@ -100,7 +128,7 @@ Do not proactively state the invoice number to the contact. Refer to it as "the 
 Invoice date: ${invoiceDate ?? "not specified"}
 Due date: ${dueDate ?? "not specified"}
 Amount due: ${currency ?? ""} ${amountDue ?? "not specified"}
-${lineItems ? `Line items: ${lineItems}` : ""}
+${lineItems ? formatLineItems(lineItems, currency ?? "") : ""}
 ${invoiceNotes ? `Notes: ${invoiceNotes}` : ""}`
       : ""
   }`;
@@ -197,6 +225,12 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
       silenceTimeoutSeconds: 30,
       endCallFunctionEnabled: true,
       endCallPhrases: ["goodbye", "talk to you later", "bye now", "have a good one"],
+      voicemailDetection: {
+        provider: "twilio",
+        voicemailDetectionTypes: ["machine_end_beep", "machine_end_silence", "machine_end_other"],
+        enabled: true,
+      },
+      backgroundDenoisingEnabled: true,
       // Webhook target
       server: {
         url: `${args.publicUrl}/api/calls/webhook`,
