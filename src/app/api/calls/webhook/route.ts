@@ -37,6 +37,10 @@ interface VapiMessage {
 }
 
 
+const STATUS_RANK: Record<string, number> = {
+  dispatching: 0, queued: 1, ringing: 2, "in-progress": 3, completed: 4, failed: 4,
+};
+
 function deriveOutcome(endedReason?: string, successEval?: string): string {
   if (successEval) {
     const s = successEval.toLowerCase();
@@ -106,6 +110,10 @@ export async function POST(req: NextRequest) {
       // Skip writing it — keep DB at "in-progress" so the Live screen stays active
       // until end-of-call-report sets status to "completed" with transcript/summary.
       if (rawStatus === "ended") break;
+      // Only advance — never regress to an earlier state (e.g. "queued" after "ringing").
+      const currentRank = STATUS_RANK[call.status] ?? -1;
+      const newRank = STATUS_RANK[rawStatus] ?? -1;
+      if (newRank <= currentRank) break;
       try {
         await prisma.call.update({
           where: { id: call.id },

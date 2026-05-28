@@ -42,6 +42,10 @@ type VapiCallDetail = Record<string, unknown> & {
   recordingUrl?: string;
 };
 
+const STATUS_RANK: Record<string, number> = {
+  dispatching: 0, queued: 1, ringing: 2, "in-progress": 3, completed: 4, failed: 4,
+};
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
@@ -80,12 +84,17 @@ export async function GET(
           },
         });
         console.log("[poll] synced completed status from Vapi for", call.id);
-      } else if (vapiData.status && vapiData.status !== call.status) {
-        // Keep in-progress status in sync (ringing → in-progress)
-        call = await prisma.call.update({
-          where: { id: call.id },
-          data: { status: vapiData.status },
-        });
+      } else if (vapiData.status) {
+        // Only advance — never regress. Prevents Vapi's early "queued" state from
+        // overwriting "ringing" that the dispatch route already set.
+        const currentRank = STATUS_RANK[call.status] ?? -1;
+        const newRank = STATUS_RANK[vapiData.status] ?? -1;
+        if (newRank > currentRank) {
+          call = await prisma.call.update({
+            where: { id: call.id },
+            data: { status: vapiData.status },
+          });
+        }
       }
     } catch (err) {
       // Vapi check failed — return what we have in the DB; don't error the poll
