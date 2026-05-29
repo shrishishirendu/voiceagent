@@ -3,8 +3,13 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { dispatchVapiCall } from "@/lib/vapi";
 
+const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
+const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
+const ACTIVE_CUTOFF_MS = 13 * 60 * 1000;
+
 const BriefSchema = z.object({
-  contactName: z.string().min(1).max(120),
+  contactBusiness: z.string().min(1).max(120),
+  contactPerson: z.string().max(120).optional(),
   toNumber: z.string().min(6).max(20).regex(/^\+?[0-9 \-()]+$/, "Must be a phone number"),
   objective: z.string().min(10).max(2000),
   voice: z.enum(["marcus", "iris", "theo"]).default("marcus"),
@@ -17,6 +22,13 @@ const BriefSchema = z.object({
   currency: z.string().optional(),
   lineItems: z.string().optional(),
   invoiceNotes: z.string().optional(),
+  bankName: z.string().optional(),
+  bsb: z.string().optional(),
+  accountNumber: z.string().optional(),
+  swiftCode: z.string().optional(),
+  abn: z.string().optional(),
+  remittanceName: z.string().optional(),
+  remittanceContact: z.string().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -36,7 +48,8 @@ export async function POST(req: NextRequest) {
   }
 
   const {
-    contactName,
+    contactBusiness,
+    contactPerson,
     toNumber,
     objective,
     voice,
@@ -49,6 +62,13 @@ export async function POST(req: NextRequest) {
     currency,
     lineItems,
     invoiceNotes,
+    bankName,
+    bsb,
+    accountNumber,
+    swiftCode,
+    abn,
+    remittanceName,
+    remittanceContact,
   } = parsed.data;
   const normalisedNumber = toNumber.replace(/[ \-()]/g, "");
 
@@ -68,12 +88,39 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Gate: reject if too many calls are already active.
+  // First, self-heal any calls stuck in ringing with no webhook — they hold slots
+  // indefinitely unless something polls them. Proactively fail them here so new
+  // dispatches aren't blocked by ghost calls from a prior session.
+  const RINGING_TIMEOUT_MS = 5 * 60 * 1000;
+  await prisma.call.updateMany({
+    where: {
+      status: "ringing",
+      createdAt: { lte: new Date(Date.now() - RINGING_TIMEOUT_MS) },
+    },
+    data: { status: "failed", endedReason: "ringing-timeout" },
+  });
+
+  const activeCount = await prisma.call.count({
+    where: {
+      status: { in: ACTIVE_STATUSES },
+      createdAt: { gte: new Date(Date.now() - ACTIVE_CUTOFF_MS) },
+    },
+  });
+  if (activeCount >= MAX_ACTIVE_CALLS) {
+    return NextResponse.json(
+      { error: "Too many calls in progress. Try again shortly.", retryable: true },
+      { status: 429 }
+    );
+  }
+
   // 1. Save the brief to DB first, so we have a row even if Vapi fails
   let call;
   try {
     call = await prisma.call.create({
       data: {
-        contactName,
+        contactBusiness,
+        contactPerson,
         toNumber: normalisedNumber,
         objective,
         voice,
@@ -85,6 +132,13 @@ export async function POST(req: NextRequest) {
         currency,
         lineItems,
         invoiceNotes,
+        bankName,
+        bsb,
+        accountNumber,
+        swiftCode,
+        abn,
+        remittanceName,
+        remittanceContact,
         status: "dispatching",
       },
     });
@@ -97,7 +151,8 @@ export async function POST(req: NextRequest) {
   try {
     const vapiCall = await dispatchVapiCall({
       toNumber: normalisedNumber,
-      contactName,
+      contactBusiness,
+      contactPerson,
       objective,
       voice,
       manner,
@@ -109,6 +164,13 @@ export async function POST(req: NextRequest) {
       currency,
       lineItems,
       invoiceNotes,
+      bankName,
+      bsb,
+      accountNumber,
+      swiftCode,
+      abn,
+      remittanceName,
+      remittanceContact,
       twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER!,
       twilioAccountSid: process.env.TWILIO_ACCOUNT_SID!,
       twilioAuthToken: process.env.TWILIO_AUTH_TOKEN!,

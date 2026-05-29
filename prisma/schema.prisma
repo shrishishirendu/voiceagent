@@ -11,7 +11,8 @@ model Call {
   id              String   @id @default(cuid())
 
   // Brief (set by user before dispatch)
-  contactName     String
+  contactBusiness String
+  contactPerson   String?
   toNumber        String
   objective       String
   voice           String   @default("marcus")
@@ -23,6 +24,13 @@ model Call {
   currency        String?
   lineItems       String?  // JSON string
   invoiceNotes    String?
+  bankName        String?
+  bsb             String?
+  accountNumber   String?
+  swiftCode       String?
+  abn             String?
+  remittanceName  String?
+  remittanceContact String?
 
   // Vapi state
   vapiCallId      String?  @unique

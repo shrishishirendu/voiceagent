@@ -2,6 +2,25 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 
+// ─── Constants ──────────────────────────────────────────────────────────
+
+const CONCURRENT_CALL_LIMIT = 5;
+const PHONE_MIN_DIGITS = 9;
+
+function createSemaphore(n: number) {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  return async function acquire<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= n) await new Promise<void>((r) => queue.push(r));
+    active++;
+    try { return await fn(); }
+    finally { active--; queue.shift()?.(); }
+  };
+}
+
+const phoneDigitCount = (value: string | null | undefined) => value?.replace(/\D/g, "").length ?? 0;
+const hasCallableNumber = (value: string | null | undefined) => phoneDigitCount(value) >= PHONE_MIN_DIGITS;
+
 // ─── Types ──────────────────────────────────────────────────────────────
 
 type Outcome = "success" | "partial" | "failed" | "no-answer" | null;
@@ -14,7 +33,7 @@ interface TranscriptLine {
 
 interface Call {
   id: string;
-  contactName: string;
+  contactBusiness: string;
   toNumber: string;
   objective: string;
   status: Status;
@@ -29,7 +48,8 @@ interface Call {
 
 interface InvoiceParseResult {
   vendorName?: string | null;
-  contactName: string | null;
+  contactBusiness: string | null;
+  contactPerson?: string | null;
   toNumber: string | null;
   invoiceNumber: string | null;
   invoiceDate: string | null;
@@ -38,6 +58,13 @@ interface InvoiceParseResult {
   currency: string | null;
   lineItems: string | null;
   invoiceNotes: string | null;
+  bankName?: string | null;
+  bsb?: string | null;
+  accountNumber?: string | null;
+  swiftCode?: string | null;
+  abn?: string | null;
+  remittanceName?: string | null;
+  remittanceContact?: string | null;
 }
 
 type BulkStatus = "parsing" | "parsed" | "parse-error" | "dispatching" | "dispatched" | "dispatch-error";
@@ -103,7 +130,8 @@ const generateInvoiceObjective = (parsed: InvoiceParseResult): string => {
 };
 
 const buildBulkBrief = (parsed: InvoiceParseResult): Record<string, unknown> => ({
-  contactName: parsed.contactName || "Accounts Payable",
+  contactBusiness: parsed.contactBusiness || "Accounts Payable",
+  contactPerson: parsed.contactPerson ?? undefined,
   toNumber: parsed.toNumber!,
   objective: generateInvoiceObjective(parsed),
   voice: "marcus",
@@ -116,6 +144,13 @@ const buildBulkBrief = (parsed: InvoiceParseResult): Record<string, unknown> => 
   currency: parsed.currency ?? undefined,
   lineItems: parsed.lineItems ?? undefined,
   invoiceNotes: parsed.invoiceNotes ?? undefined,
+  bankName: parsed.bankName ?? undefined,
+  bsb: parsed.bsb ?? undefined,
+  accountNumber: parsed.accountNumber ?? undefined,
+  swiftCode: parsed.swiftCode ?? undefined,
+  abn: parsed.abn ?? undefined,
+  remittanceName: parsed.remittanceName ?? undefined,
+  remittanceContact: parsed.remittanceContact ?? undefined,
 });
 
 // ─── Shared bits ────────────────────────────────────────────────────────
@@ -260,7 +295,7 @@ function Home({
                     </span>
                   </div>
                   <h3 className="font-display text-[1.2rem] leading-tight font-medium tracking-tight">
-                    {call.contactName}
+                    {call.contactBusiness}
                   </h3>
                 </div>
                 {active ? (
@@ -346,14 +381,15 @@ function Compose({ onCancel, onPlace }: { onCancel: () => void; onPlace: (b: any
     { id: "formal", name: "Formal", desc: "Professional, precise" },
   ];
 
-  const isValid = number.trim().length > 6 && objective.trim().length > 9 && !submitting;
+  const phoneDigits = phoneDigitCount(number);
+  const isValid = phoneDigits >= 9 && objective.trim().length > 9 && !submitting;
 
   const submit = async () => {
     setSubmitting(true);
     setError(null);
     try {
       await onPlace({
-        contactName: contact || "Unknown contact",
+        contactBusiness: contact || "Unknown contact",
         toNumber: number,
         objective,
         voice,
@@ -400,7 +436,7 @@ function Compose({ onCancel, onPlace }: { onCancel: () => void; onPlace: (b: any
 
         <div>
           <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>
-            Contact <span style={{ color: "var(--muted-light)" }}>· optional</span>
+            Contact / business <span style={{ color: "var(--muted-light)" }}>· optional</span>
           </label>
           <input
             type="text"
@@ -414,7 +450,7 @@ function Compose({ onCancel, onPlace }: { onCancel: () => void; onPlace: (b: any
 
         <div>
           <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>
-            Your name <span style={{ color: "var(--muted-light)" }}>· how Envoy refers to you</span>
+            Your name / business <span style={{ color: "var(--muted-light)" }}>· how Envoy refers to you</span>
           </label>
           <input
             type="text"
@@ -514,9 +550,11 @@ function Compose({ onCancel, onPlace }: { onCancel: () => void; onPlace: (b: any
 }
 
 type BulkFormState = {
-  toNumber: string; contactName: string; vendorName: string;
+  toNumber: string; contactBusiness: string; contactPerson: string; vendorName: string;
   invoiceNumber: string; invoiceDate: string; dueDate: string;
   amountDue: string; currency: string; lineItems: string; invoiceNotes: string;
+  bankName: string; bsb: string; accountNumber: string; swiftCode: string;
+  abn: string; remittanceName: string; remittanceContact: string;
 };
 
 function InvoiceCompose({
@@ -538,7 +576,8 @@ function InvoiceCompose({
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
   const [number, setNumber] = useState(pre?.toNumber ?? "+61 ");
-  const [contact, setContact] = useState(pre?.contactName ?? "");
+  const [contactBusiness, setContactBusiness] = useState(pre?.contactBusiness ?? "");
+  const [contactPerson, setContactPerson] = useState(pre?.contactPerson ?? "");
   const [objective, setObjective] = useState(() => (pre ? generateInvoiceObjective(pre) : ""));
   const [voice, setVoice] = useState("marcus");
   const [manner, setManner] = useState("warm");
@@ -550,8 +589,18 @@ function InvoiceCompose({
   const [currency, setCurrency] = useState(pre?.currency ?? "");
   const [lineItems, setLineItems] = useState(pre?.lineItems ?? "");
   const [invoiceNotes, setInvoiceNotes] = useState(pre?.invoiceNotes ?? "");
+  const [bankName, setBankName] = useState(pre?.bankName ?? "");
+  const [bsb, setBsb] = useState(pre?.bsb ?? "");
+  const [accountNumber, setAccountNumber] = useState(pre?.accountNumber ?? "");
+  const [swiftCode, setSwiftCode] = useState(pre?.swiftCode ?? "");
+  const [abn, setAbn] = useState(pre?.abn ?? "");
+  const [remittanceName, setRemittanceName] = useState(pre?.remittanceName ?? "");
+  const [remittanceContact, setRemittanceContact] = useState(pre?.remittanceContact ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [phoneSource, setPhoneSource] = useState<"parsed" | "contacts" | "manual">(
+    pre?.toNumber ? "parsed" : "manual"
+  );
 
   const voices = [
     { id: "marcus", name: "Marcus", desc: "Steady, AU male" },
@@ -564,12 +613,25 @@ function InvoiceCompose({
     { id: "formal", name: "Formal", desc: "Professional, precise" },
   ];
 
-  const isValid = number.trim().length > 6 && objective.trim().length > 9 && !submitting;
+  const phoneDigits = number.replace(/\D/g, "").length;
+  const isValid = phoneDigits >= 9 && objective.trim().length > 9 && !submitting;
 
-  const handleParseSuccess = (parsed: InvoiceParseResult) => {
+  const handleParseSuccess = async (parsed: InvoiceParseResult) => {
     const nextInvoiceNumber = parsed.invoiceNumber ?? "";
-    setContact(parsed.contactName ?? "");
-    setNumber(parsed.toNumber ?? "+61 ");
+    const parsedToNumber = hasCallableNumber(parsed.toNumber) ? parsed.toNumber : null;
+    const parsedContactBusiness =
+      !parsedToNumber &&
+      parsed.toNumber &&
+      /[A-Za-z]/.test(parsed.toNumber) &&
+      !parsed.toNumber.includes("@") &&
+      (!parsed.contactBusiness ||
+        parsed.contactBusiness.includes("@") ||
+        (/^[A-Za-z0-9._-]+$/.test(parsed.contactBusiness) && parsed.contactBusiness.includes(".")))
+        ? parsed.toNumber
+        : parsed.contactBusiness;
+    setContactBusiness(parsedContactBusiness ?? "");
+    setContactPerson(parsed.contactPerson ?? "");
+    setNumber(parsedToNumber ?? "+61 ");
     if (parsed.vendorName) setUserName(parsed.vendorName);
     setInvoiceNumber(nextInvoiceNumber);
     setInvoiceDate(parsed.invoiceDate ?? "");
@@ -578,6 +640,13 @@ function InvoiceCompose({
     setCurrency(parsed.currency ?? "");
     setLineItems(parsed.lineItems ?? "");
     setInvoiceNotes(parsed.invoiceNotes ?? "");
+    setBankName(parsed.bankName ?? "");
+    setBsb(parsed.bsb ?? "");
+    setAccountNumber(parsed.accountNumber ?? "");
+    setSwiftCode(parsed.swiftCode ?? "");
+    setAbn(parsed.abn ?? "");
+    setRemittanceName(parsed.remittanceName ?? "");
+    setRemittanceContact(parsed.remittanceContact ?? "");
     const objParts: string[] = ["Follow up on payment for invoice"];
     if (nextInvoiceNumber) objParts.push(nextInvoiceNumber);
     if (parsed.amountDue != null) {
@@ -588,6 +657,26 @@ function InvoiceCompose({
     objParts.push(". Confirm whether payment has been made or is scheduled. If overdue, politely arrange a settlement date or payment plan.");
     setObjective(objParts.join(" "));
     setStage("review");
+
+    if (!parsedToNumber && parsedContactBusiness) {
+      try {
+        const params = new URLSearchParams();
+        params.set("contactBusiness", parsedContactBusiness);
+        if (parsed.invoiceNumber) params.set("invoiceNumber", parsed.invoiceNumber);
+        const r = await fetch(`/api/contacts/lookup?${params}`);
+        if (r.ok) {
+          const data = (await r.json()) as { phone: string | null };
+          if (data.phone) {
+            setNumber(data.phone);
+            setPhoneSource("contacts");
+          }
+        }
+      } catch {
+        // non-blocking — leave field empty for manual entry
+      }
+    } else if (parsedToNumber) {
+      setPhoneSource("parsed");
+    }
   };
 
   const parseInvoice = async () => {
@@ -622,7 +711,8 @@ function InvoiceCompose({
     setSubmitError(null);
     try {
       await onPlace({
-        contactName: contact || "Unknown contact",
+        contactBusiness: contactBusiness || "Accounts Payable",
+        contactPerson: contactPerson || undefined,
         toNumber: number,
         objective,
         voice,
@@ -635,6 +725,13 @@ function InvoiceCompose({
         currency: currency || undefined,
         lineItems: lineItems || undefined,
         invoiceNotes: invoiceNotes || undefined,
+        bankName: bankName || undefined,
+        bsb: bsb || undefined,
+        accountNumber: accountNumber || undefined,
+        swiftCode: swiftCode || undefined,
+        abn: abn || undefined,
+        remittanceName: remittanceName || undefined,
+        remittanceContact: remittanceContact || undefined,
       });
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to dispatch");
@@ -648,7 +745,7 @@ function InvoiceCompose({
         <button
           onClick={() => {
             if (onBackWithState) {
-              onBackWithState({ toNumber: number, contactName: contact, vendorName: userName, invoiceNumber, invoiceDate, dueDate, amountDue, currency, lineItems, invoiceNotes });
+              onBackWithState({ toNumber: number, contactBusiness, contactPerson, vendorName: userName, invoiceNumber, invoiceDate, dueDate, amountDue, currency, lineItems, invoiceNotes, bankName, bsb, accountNumber, swiftCode, abn, remittanceName, remittanceContact });
             } else {
               onCancel();
             }
@@ -761,20 +858,23 @@ function InvoiceCompose({
                   <input
                     type="tel"
                     value={number}
-                    onChange={(e) => setNumber(e.target.value)}
+                    onChange={(e) => { setNumber(e.target.value); setPhoneSource("manual"); }}
                     placeholder="+61 4..."
                     className="w-full pb-3 font-mono text-[1.2rem] bg-transparent"
                     style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
                   />
+                  {phoneSource === "contacts" && (
+                    <p className="text-[0.72rem] mt-1.5" style={{ color: "var(--muted)" }}>Found in contacts</p>
+                  )}
                 </div>
 
                 <div>
-                  <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>Contact name</label>
+                  <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>Business</label>
                   <input
                     type="text"
-                    value={contact}
-                    onChange={(e) => setContact(e.target.value)}
-                    placeholder="e.g. Acme Pty Ltd"
+                    value={contactBusiness}
+                    onChange={(e) => setContactBusiness(e.target.value)}
+                    placeholder="e.g. Acme"
                     className="w-full pb-3 text-[1.05rem] bg-transparent"
                     style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
                   />
@@ -782,7 +882,21 @@ function InvoiceCompose({
 
                 <div>
                   <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>
-                    Your name <span style={{ color: "var(--muted-light)" }}>· how Envoy refers to you</span>
+                    Contact person <span style={{ color: "var(--muted-light)" }}>· optional, used only when asked</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={contactPerson}
+                    onChange={(e) => setContactPerson(e.target.value)}
+                    placeholder="e.g. Ameet"
+                    className="w-full pb-3 text-[1.05rem] bg-transparent"
+                    style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                  />
+                </div>
+
+                <div>
+                  <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>
+                    Your name / business <span style={{ color: "var(--muted-light)" }}>· how Envoy refers to you</span>
                   </label>
                   <input
                     type="text"
@@ -946,11 +1060,101 @@ function InvoiceCompose({
                 })()}
 
                 <div>
+                  <p className="smallcaps mb-4" style={{ color: "var(--muted)" }}>Payment details</p>
+
+                  <div className="space-y-7">
+                    <div>
+                      <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>Bank name</label>
+                      <input
+                        type="text"
+                        value={bankName}
+                        onChange={(e) => setBankName(e.target.value)}
+                        placeholder="e.g. Deutsche Bank AG"
+                        className="w-full pb-3 text-[1.05rem] bg-transparent"
+                        style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>BSB</label>
+                      <input
+                        type="text"
+                        value={bsb}
+                        onChange={(e) => setBsb(e.target.value)}
+                        placeholder="e.g. 414111"
+                        className="w-full pb-3 text-[1.05rem] bg-transparent"
+                        style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>Account number</label>
+                      <input
+                        type="text"
+                        value={accountNumber}
+                        onChange={(e) => setAccountNumber(e.target.value)}
+                        placeholder="e.g. 180010301"
+                        className="w-full pb-3 text-[1.05rem] bg-transparent"
+                        style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>SWIFT / BIC</label>
+                      <input
+                        type="text"
+                        value={swiftCode}
+                        onChange={(e) => setSwiftCode(e.target.value)}
+                        placeholder="e.g. DEUTAU2SGTB"
+                        className="w-full pb-3 text-[1.05rem] bg-transparent"
+                        style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>ABN</label>
+                      <input
+                        type="text"
+                        value={abn}
+                        onChange={(e) => setAbn(e.target.value)}
+                        placeholder="e.g. 59 863 426 362"
+                        className="w-full pb-3 text-[1.05rem] bg-transparent"
+                        style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>Remit to (name)</label>
+                      <input
+                        type="text"
+                        value={remittanceName}
+                        onChange={(e) => setRemittanceName(e.target.value)}
+                        placeholder="e.g. Quest Software International Limited"
+                        className="w-full pb-3 text-[1.05rem] bg-transparent"
+                        style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>Remit to (contact)</label>
+                      <input
+                        type="text"
+                        value={remittanceContact}
+                        onChange={(e) => setRemittanceContact(e.target.value)}
+                        placeholder="Address or email for remittance advice"
+                        className="w-full pb-3 text-[1.05rem] bg-transparent"
+                        style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div>
                   <label className="smallcaps mb-2.5 block" style={{ color: "var(--muted)" }}>Invoice notes</label>
                   <textarea
                     value={invoiceNotes}
                     onChange={(e) => setInvoiceNotes(e.target.value)}
-                    rows={4}
+                    rows={invoiceNotes ? 4 : 2}
                     className="w-full pb-3 text-[1.05rem] bg-transparent leading-relaxed resize-none"
                     style={{ borderBottom: "1px solid var(--hairline-strong)", color: "var(--ink)" }}
                   />
@@ -998,9 +1202,11 @@ function InvoiceCompose({
 function Live({
   callId,
   onDone,
+  onViewDetail,
 }: {
   callId: string;
   onDone: () => void;
+  onViewDetail: () => void;
 }) {
   const [call, setCall] = useState<Call | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -1075,7 +1281,7 @@ function Live({
         </div>
 
         <h2 className="font-display text-[1.85rem] leading-tight font-light tracking-tight mb-1">
-          {call?.contactName ?? "…"}
+          {call?.contactBusiness ?? "…"}
         </h2>
         <p className="font-mono text-[0.85rem]" style={{ opacity: 0.6 }}>{call?.toNumber ?? ""}</p>
 
@@ -1124,7 +1330,7 @@ function Live({
               className="smallcaps mb-1"
               style={{ color: line.who === "envoy" ? "#D4A574" : "var(--muted-light)" }}
             >
-              {line.who === "envoy" ? "Envoy" : call.contactName.split(" ")[0]}
+              {line.who === "envoy" ? "Envoy" : call.contactBusiness.split(" ")[0]}
             </p>
             <p className="text-[0.96rem] leading-relaxed" style={{ opacity: 0.95 }}>{line.text}</p>
           </div>
@@ -1149,7 +1355,7 @@ function Live({
 
       <div className="px-5 pb-7 pt-3">
         <button
-          onClick={onDone}
+          onClick={finished ? onViewDetail : onDone}
           className="w-full py-4 rounded-full text-[1rem] font-medium transition active:scale-[0.98]"
           style={{
             background: finished ? "var(--ink)" : "rgba(244,239,230,0.08)",
@@ -1157,7 +1363,7 @@ function Live({
             color: "var(--cream)",
           }}
         >
-          {finished ? "Done" : "Back to history"}
+          {finished ? "View transcript" : "Back to history"}
         </button>
       </div>
     </div>
@@ -1185,7 +1391,7 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
           </span>
         </div>
 
-        <h1 className="font-display text-[2rem] leading-tight font-light tracking-tight mb-1">{call.contactName}</h1>
+        <h1 className="font-display text-[2rem] leading-tight font-light tracking-tight mb-1">{call.contactBusiness}</h1>
         <p className="font-mono text-[0.85rem]" style={{ color: "var(--muted)" }}>{call.toNumber}</p>
       </header>
 
@@ -1229,7 +1435,7 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
               {call.transcript.map((line, i) => (
                 <div key={i}>
                   <p className="smallcaps mb-1" style={{ color: line.who === "envoy" ? "var(--burgundy)" : "var(--muted)" }}>
-                    {line.who === "envoy" ? "Envoy" : call.contactName.split(" ")[0]}
+                    {line.who === "envoy" ? "Envoy" : call.contactBusiness.split(" ")[0]}
                   </p>
                   <p className="text-[0.95rem] leading-relaxed">{line.text}</p>
                 </div>
@@ -1278,7 +1484,7 @@ function BulkItemRow({
 }) {
   const { status, file, parsed, error, callStatus, callOutcome } = item;
   const canDispatch = (status === "parsed" || status === "dispatch-error") &&
-    !!(parsed?.toNumber) && (parsed.toNumber.trim().length > 6);
+    hasCallableNumber(parsed?.toNumber);
   const isSettled = status === "dispatched" && (callStatus === "completed" || callStatus === "failed");
   const outcomeInfo = isSettled ? outcomeStyle(callOutcome ?? null) : null;
 
@@ -1295,14 +1501,14 @@ function BulkItemRow({
       {/* Remove button */}
       <button
         onClick={(e) => { e.stopPropagation(); onRemove(); }}
-        className="absolute top-2 right-2 w-5 h-5 flex items-center justify-center rounded-full border text-[0.65rem] leading-none transition hover:opacity-60"
-        style={{ color: "var(--muted)", borderColor: "var(--hairline-strong)", background: "var(--cream)" }}
+        className="absolute w-5 h-5 flex items-center justify-center rounded-full border text-[0.65rem] leading-none transition hover:opacity-60"
+        style={{ top: "-10px", right: "-10px", zIndex: 10, color: "var(--muted)", borderColor: "var(--hairline-strong)", background: "var(--cream)" }}
         title="Remove"
       >
         ×
       </button>
 
-      <div className="flex items-center justify-between gap-3 pr-5">
+      <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-[0.92rem] font-medium truncate" style={{ color: "var(--ink)" }}>
             {file.name}
@@ -1401,6 +1607,7 @@ function BulkInvoiceScreen({
   onViewDetail,
   onBack,
   onDispatchAll,
+  isDispatching,
 }: {
   items: BulkItem[];
   onAddFiles: (files: File[]) => void;
@@ -1411,12 +1618,13 @@ function BulkInvoiceScreen({
   onViewDetail: (callId: string) => void;
   onBack: () => void;
   onDispatchAll: () => void;
+  isDispatching: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const parsing = items.filter((i) => i.status === "parsing").length;
   const dispatched = items.filter((i) => i.status === "dispatched").length;
-  const dispatchReady = items.filter((i) => i.status === "parsed" && !!i.parsed?.toNumber).length;
+  const dispatchReady = items.filter((i) => i.status === "parsed" && hasCallableNumber(i.parsed?.toNumber)).length;
 
   return (
     <div className="min-h-screen pb-32 fade-in">
@@ -1477,7 +1685,7 @@ function BulkInvoiceScreen({
           <p className="text-[0.82rem] mt-1" style={{ color: "var(--muted-light)" }}>Click "Add PDFs" to get started.</p>
         </div>
       ) : (
-        <div className="px-6 space-y-3">
+        <div className="px-6 space-y-3 pb-40">
           {items.map((item) => (
             <BulkItemRow
               key={item.uid}
@@ -1497,18 +1705,20 @@ function BulkInvoiceScreen({
         style={{ background: "linear-gradient(to top, var(--cream) 65%, transparent)" }}
       >
         <button
-          disabled={dispatchReady === 0}
+          disabled={dispatchReady === 0 || isDispatching}
           onClick={onDispatchAll}
           className="w-full py-4 rounded-full font-medium text-[1rem] transition active:scale-[0.98]"
           style={{
-            background: dispatchReady > 0 ? "var(--burgundy)" : "var(--hairline-strong)",
+            background: dispatchReady > 0 && !isDispatching ? "var(--burgundy)" : "var(--hairline-strong)",
             color: "var(--cream)",
-            opacity: dispatchReady > 0 ? 1 : 0.6,
-            cursor: dispatchReady > 0 ? "pointer" : "not-allowed",
+            opacity: dispatchReady > 0 && !isDispatching ? 1 : 0.6,
+            cursor: dispatchReady > 0 && !isDispatching ? "pointer" : "not-allowed",
             letterSpacing: "-0.01em",
           }}
         >
-          {dispatchReady > 0 ? `Dispatch All (${dispatchReady})` : "Dispatch All"}
+          {isDispatching
+            ? "Dispatching…"
+            : dispatchReady > 0 ? `Dispatch All (${dispatchReady})` : "Dispatch All"}
         </button>
       </div>
     </div>
@@ -1525,6 +1735,7 @@ export default function EnvoyApp() {
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
   const [reviewBulkUid, setReviewBulkUid] = useState<string | null>(null);
   const [returnToBulk, setReturnToBulk] = useState(false);
+  const [isDispatching, setIsDispatching] = useState(false);
   const bulkItemsRef = useRef<BulkItem[]>([]);
   useEffect(() => { bulkItemsRef.current = bulkItems; }, [bulkItems]);
 
@@ -1585,29 +1796,57 @@ export default function EnvoyApp() {
       const r = await fetch("/api/calls/parse-document", { method: "POST", body: formData });
       const payload = await r.json() as InvoiceParseResult & { error?: string };
       if (!r.ok) throw new Error(payload.error ?? `HTTP ${r.status}`);
-      setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "parsed", parsed: payload } : i));
+
+      // Fallback: if the PDF had no callable number, try the contacts DB
+      // (mirrors handleParseSuccess in the single-invoice flow)
+      let resolved = payload;
+      if (!hasCallableNumber(payload.toNumber)) {
+        try {
+          const params = new URLSearchParams();
+          if (payload.contactBusiness) params.set("contactBusiness", payload.contactBusiness);
+          if (payload.invoiceNumber) params.set("invoiceNumber", payload.invoiceNumber);
+          if ([...params.keys()].length > 0) {
+            const lr = await fetch(`/api/contacts/lookup?${params}`);
+            if (lr.ok) {
+              const data = (await lr.json()) as { phone: string | null };
+              if (data.phone) resolved = { ...payload, toNumber: data.phone };
+            }
+          }
+        } catch {
+          // non-blocking — leave number empty, user can fill via Details
+        }
+      }
+      setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "parsed", parsed: resolved } : i));
     } catch (err) {
       setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "parse-error", error: err instanceof Error ? err.message : "Parse failed" } : i));
     }
   };
 
   const handleBulkFiles = (files: File[]) => {
-    const newItems: BulkItem[] = files.map((file) => ({
-      uid: crypto.randomUUID(),
-      file,
-      status: "parsing" as BulkStatus,
-    }));
-    setBulkItems((prev) => [...prev, ...newItems]);
     setScreen("bulk-invoice");
-    newItems.forEach((item) => parseBulkItem(item.uid, item.file));
+    setBulkItems((prev) => {
+      const seen = new Set(prev.map((i) => `${i.file.name}::${i.file.size}`));
+      const newItems: BulkItem[] = [];
+      for (const file of files) {
+        const key = `${file.name}::${file.size}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        newItems.push({ uid: crypto.randomUUID(), file, status: "parsing" as BulkStatus });
+      }
+      newItems.forEach((item) => parseBulkItem(item.uid, item.file));
+      return [...prev, ...newItems];
+    });
   };
 
   const handleBulkFilesFromHome = (files: File[]) => {
-    const newItems: BulkItem[] = files.map((file) => ({
-      uid: crypto.randomUUID(),
-      file,
-      status: "parsing" as BulkStatus,
-    }));
+    const seen = new Set<string>();
+    const newItems: BulkItem[] = [];
+    for (const file of files) {
+      const key = `${file.name}::${file.size}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      newItems.push({ uid: crypto.randomUUID(), file, status: "parsing" as BulkStatus });
+    }
     setBulkItems(newItems);
     setScreen("bulk-invoice");
     newItems.forEach((item) => parseBulkItem(item.uid, item.file));
@@ -1623,9 +1862,9 @@ export default function EnvoyApp() {
     setScreen("detail");
   };
 
-  const dispatchBulkItem = async (uid: string) => {
+  const dispatchBulkItem = async (uid: string): Promise<false | void> => {
     const item = bulkItems.find((i) => i.uid === uid);
-    if (!item?.parsed?.toNumber) return;
+    if (!item?.parsed || !hasCallableNumber(item.parsed.toNumber)) return;
     setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "dispatching" } : i));
     try {
       const r = await fetch("/api/calls/dispatch", {
@@ -1633,6 +1872,11 @@ export default function EnvoyApp() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildBulkBrief(item.parsed)),
       });
+      if (r.status === 429) {
+        // Server at capacity — reset so the drain loop can retry this item
+        setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "parsed" } : i));
+        return false;
+      }
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
         throw new Error(e.error ?? `HTTP ${r.status}`);
@@ -1676,8 +1920,9 @@ export default function EnvoyApp() {
           ...i,
           parsed: {
             ...i.parsed,
-            toNumber: state.toNumber.trim().length > 6 ? state.toNumber.trim() : null,
-            contactName: state.contactName || null,
+            toNumber: hasCallableNumber(state.toNumber) ? state.toNumber.trim() : null,
+            contactBusiness: state.contactBusiness || null,
+            contactPerson: state.contactPerson || null,
             vendorName: state.vendorName || null,
             invoiceNumber: state.invoiceNumber || null,
             invoiceDate: state.invoiceDate || null,
@@ -1686,6 +1931,13 @@ export default function EnvoyApp() {
             currency: state.currency || null,
             lineItems: state.lineItems || null,
             invoiceNotes: state.invoiceNotes || null,
+            bankName: state.bankName || null,
+            bsb: state.bsb || null,
+            accountNumber: state.accountNumber || null,
+            swiftCode: state.swiftCode || null,
+            abn: state.abn || null,
+            remittanceName: state.remittanceName || null,
+            remittanceContact: state.remittanceContact || null,
           },
         };
       }));
@@ -1699,10 +1951,43 @@ export default function EnvoyApp() {
     setScreen("bulk-invoice");
   };
 
-  const handleDispatchAll = () => {
-    bulkItems
-      .filter((i) => i.status === "parsed" && !!i.parsed?.toNumber)
-      .forEach((i) => dispatchBulkItem(i.uid));
+  const handleDispatchAll = async () => {
+    const toDispatch = bulkItemsRef.current.filter(
+      (i) => i.status === "parsed" && hasCallableNumber(i.parsed?.toNumber)
+    );
+    if (toDispatch.length === 0) return;
+    setIsDispatching(true);
+    try {
+      // Drain loop: server 429 is backpressure — retry the head of the queue.
+      // Cap retries per item so the loop always terminates if the server stays at capacity.
+      const queue = [...toDispatch];
+      const retries = new Map<string, number>();
+      const RETRY_WAIT = 2_000;
+      const MAX_RETRIES = 8; // ~16 s per item before giving up
+      while (queue.length > 0) {
+        const item = queue[0];
+        const result = await dispatchBulkItem(item.uid);
+        if (result === false) {
+          const n = (retries.get(item.uid) ?? 0) + 1;
+          retries.set(item.uid, n);
+          if (n >= MAX_RETRIES) {
+            setBulkItems((prev) => prev.map((i) =>
+              i.uid === item.uid ? { ...i, status: "dispatch-error", error: "Server at capacity — try again shortly" } : i
+            ));
+            queue.shift();
+            retries.delete(item.uid);
+          } else {
+            await new Promise((r) => setTimeout(r, RETRY_WAIT));
+          }
+          continue;
+        }
+        queue.shift();
+        retries.delete(item.uid);
+        if (queue.length > 0) await new Promise((r) => setTimeout(r, 1_000));
+      }
+    } finally {
+      setIsDispatching(false);
+    }
   };
 
   const activeCall = calls.find((c) => c.id === activeCallId) ?? null;
@@ -1724,6 +2009,7 @@ export default function EnvoyApp() {
       )}
       {screen === "invoice-compose" && (
         <InvoiceCompose
+          key={reviewBulkUid ? `bulk-${reviewBulkUid}` : "single-invoice"}
           onCancel={reviewBulkUid ? closeBulkDetails : () => setScreen("home")}
           onPlace={reviewBulkUid ? bulkDetailsDispatch : dispatch}
           preloaded={reviewBulkUid ? { parsed: bulkItems.find((i) => i.uid === reviewBulkUid)!.parsed! } : undefined}
@@ -1740,6 +2026,7 @@ export default function EnvoyApp() {
           onDispatchAll={handleDispatchAll}
           onRemove={handleRemoveBulkItem}
           onViewDetail={openBulkCallDetail}
+          isDispatching={isDispatching}
           onRetry={(uid) => {
             const item = bulkItems.find((i) => i.uid === uid);
             if (item) {
@@ -1754,6 +2041,7 @@ export default function EnvoyApp() {
         <Live
           callId={activeCallId}
           onDone={() => { fetchCalls(); setScreen("home"); setActiveCallId(null); }}
+          onViewDetail={() => { fetchCalls(); setReturnToBulk(false); setScreen("detail"); }}
         />
       )}
       {screen === "detail" && activeCall && (

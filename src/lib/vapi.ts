@@ -12,6 +12,10 @@
 
 const VAPI_BASE = "https://api.vapi.ai";
 
+const VAPI_MAX_RETRIES = 4;
+const VAPI_RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 type Manner = "warm" | "crisp" | "formal";
 type VoiceId = "marcus" | "iris" | "theo";
 
@@ -62,7 +66,8 @@ function formatLineItems(lineItems: string, currency: string): string {
 
 interface BuildSystemPromptArgs {
   userName: string;
-  contactName: string;
+  contactBusiness: string;
+  contactPerson?: string;
   objective: string;
   manner: Manner;
   invoiceNumber?: string;
@@ -72,6 +77,13 @@ interface BuildSystemPromptArgs {
   currency?: string;
   lineItems?: string;
   invoiceNotes?: string;
+  bankName?: string;
+  bsb?: string;
+  accountNumber?: string;
+  swiftCode?: string;
+  abn?: string;
+  remittanceName?: string;
+  remittanceContact?: string;
 }
 
 /**
@@ -81,7 +93,8 @@ interface BuildSystemPromptArgs {
 export function buildSystemPrompt(args: BuildSystemPromptArgs): string {
   const {
     userName,
-    contactName,
+    contactBusiness,
+    contactPerson,
     objective,
     manner,
     invoiceNumber,
@@ -93,7 +106,11 @@ export function buildSystemPrompt(args: BuildSystemPromptArgs): string {
     invoiceNotes,
   } = args;
 
-  return `You are Envoy, a polite AI agent placing a phone call on behalf of ${userName}. You're calling ${contactName}.
+  return `You are Envoy, a polite AI agent placing a phone call on behalf of ${userName}. You're calling ${contactBusiness}.${
+    contactPerson
+      ? ` If you're asked who you'd like to be directed to or who you're trying to reach, ask to speak with ${contactPerson}. Do not volunteer ${contactPerson}'s name otherwise; if no specific person is requested, ask for Accounts Payable.`
+      : ""
+  }
 
 # Your objective
 ${objective}
@@ -110,6 +127,8 @@ ${MANNER_GUIDANCE[manner]}
 - If you achieve the objective, confirm the result clearly back to them ("So just to confirm, that's Tuesday the 19th at 2:30pm — perfect, thank you."), then politely end the call.
 - If you can't achieve the objective (closed, no availability, wrong number, etc.), say so honestly and end the call politely.
 - Never make commitments on behalf of ${userName} beyond what's explicitly in the objective. If asked something you can't decide, defer: "I'll need to check with them and get back to you."
+- When referring to ${userName} or ${contactBusiness}${contactPerson ? ` or ${contactPerson}` : ""} by name, use the short name as given — do not expand or re-add legal suffixes like "Pty Ltd" or "International Limited".
+- Speak monetary amounts as natural English words, never as digit strings. State the full precise amount when first raising it or when the contact explicitly asks what they owe (e.g. "seven thousand four hundred and ninety dollars and thirty-six cents"). In later references within the same conversation, you may use the shorthand a human would reach for (e.g. "about seventy-five hundred" or "just under seventy-five hundred dollars"). The guiding principle: the contact should always be able to walk away knowing the exact amount — so if they ask directly, always give the precise figure in full.
 
 # Date context
 Today is ${new Date().toISOString().split("T")[0]}. When the invoice is overdue (due date is before today), acknowledge it is overdue and focus on arranging a future payment date. All suggested settlement dates or payment plan start dates must be after today.
@@ -129,14 +148,15 @@ Invoice date: ${invoiceDate ?? "not specified"}
 Due date: ${dueDate ?? "not specified"}
 Amount due: ${currency ?? ""} ${amountDue ?? "not specified"}
 ${lineItems ? formatLineItems(lineItems, currency ?? "") : ""}
-${invoiceNotes ? `Notes: ${invoiceNotes}` : ""}`
+${invoiceNotes ? `Notes: ${invoiceNotes}` : ""}${(args.bankName || args.bsb || args.accountNumber || args.swiftCode || args.abn || args.remittanceName || args.remittanceContact) ? `\nPayment details:${args.bankName ? `\nBank: ${args.bankName}` : ""}${args.bsb ? ` | BSB: ${args.bsb}` : ""}${args.accountNumber ? ` | Account: ${args.accountNumber}` : ""}${args.swiftCode ? ` | SWIFT: ${args.swiftCode}` : ""}${args.abn ? ` | ABN: ${args.abn}` : ""}${args.remittanceName ? `\nRemit to: ${args.remittanceName}` : ""}${args.remittanceContact ? `, ${args.remittanceContact}` : ""}\nWhen the contact asks how they can pay or what payment options are available, first name the available method(s) only — for example "We can accept payment by bank transfer" — without giving any details yet. Only share the actual account details if the contact confirms they want them or explicitly asks for the information. When you do share the details, read them out in small groups of 2–3 pieces at a time, pausing after each group to let them write it down. For example: state the bank name and BSB first, then pause; then the account number, then pause; then any remaining details such as SWIFT code or ABN. Never read all banking fields in one go.` : ""}`
       : ""
   }`;
 }
 
 interface CreateCallArgs {
   toNumber: string;
-  contactName: string;
+  contactBusiness: string;
+  contactPerson?: string;
   objective: string;
   voice: VoiceId;
   manner: Manner;
@@ -148,6 +168,13 @@ interface CreateCallArgs {
   currency?: string;
   lineItems?: string;
   invoiceNotes?: string;
+  bankName?: string;
+  bsb?: string;
+  accountNumber?: string;
+  swiftCode?: string;
+  abn?: string;
+  remittanceName?: string;
+  remittanceContact?: string;
   twilioPhoneNumber: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
@@ -169,7 +196,8 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
 
   const systemPrompt = buildSystemPrompt({
     userName: args.userName,
-    contactName: args.contactName,
+    contactBusiness: args.contactBusiness,
+    contactPerson: args.contactPerson,
     objective: args.objective,
     manner: args.manner,
     invoiceNumber: args.invoiceNumber,
@@ -179,6 +207,13 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
     currency: args.currency,
     lineItems: args.lineItems,
     invoiceNotes: args.invoiceNotes,
+    bankName: args.bankName,
+    bsb: args.bsb,
+    accountNumber: args.accountNumber,
+    swiftCode: args.swiftCode,
+    abn: args.abn,
+    remittanceName: args.remittanceName,
+    remittanceContact: args.remittanceContact,
   });
 
   // Vapi accepts a transient assistant inline — no need to pre-create one
@@ -240,21 +275,34 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
     // server: { url: `${process.env.PUBLIC_URL}/api/calls/webhook` },
   };
 
-  const res = await fetch(`${VAPI_BASE}/call`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.VAPI_PRIVATE_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+  let lastErr = "";
+  for (let attempt = 0; attempt <= VAPI_MAX_RETRIES; attempt++) {
+    const res = await fetch(`${VAPI_BASE}/call`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.VAPI_PRIVATE_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
 
-  if (!res.ok) {
+    if (res.ok) return res.json() as Promise<VapiCallResponse>;
+
     const text = await res.text();
-    throw new Error(`Vapi dispatch failed: ${res.status} ${text}`);
-  }
+    lastErr = `Vapi dispatch failed: ${res.status} ${text}`;
 
-  return res.json() as Promise<VapiCallResponse>;
+    if (!VAPI_RETRYABLE_STATUS.has(res.status) || attempt === VAPI_MAX_RETRIES) {
+      throw new Error(lastErr);
+    }
+
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const backoff =
+      Number.isFinite(retryAfter) && retryAfter > 0
+        ? retryAfter * 1000
+        : Math.min(8000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
+    await sleep(backoff);
+  }
+  throw new Error(lastErr);
 }
 
 /**
@@ -265,7 +313,8 @@ export async function getVapiCall(vapiCallId: string): Promise<VapiCallResponse>
     headers: { Authorization: `Bearer ${process.env.VAPI_PRIVATE_KEY}` },
   });
   if (!res.ok) {
-    throw new Error(`Vapi getCall failed: ${res.status}`);
+    const text = await res.text().catch(() => "");
+    throw new Error(`Vapi getCall failed: ${res.status} ${text}`);
   }
   return res.json() as Promise<VapiCallResponse>;
 }

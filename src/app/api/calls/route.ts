@@ -10,7 +10,7 @@ export async function GET() {
   return NextResponse.json({
     calls: calls.map((c) => ({
       id: c.id,
-      contactName: c.contactName,
+      contactBusiness: c.contactBusiness,
       toNumber: c.toNumber,
       objective: c.objective,
       status: c.status,
