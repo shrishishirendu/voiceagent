@@ -101,56 +101,6 @@ Open **http://localhost:3000** in your browser. You should see Envoy with no cal
 5. Your phone will ring within ~5 seconds. Pick up and talk!
 6. When the call ends, the summary appears in the app.
 
-## Vendor contact database
-
-Envoy maintains an internal contact database so it can automatically look up a client's phone number when an invoice doesn't include one.
-
-### First-time setup
-
-```bash
-# Copy the example template (prisma/contacts.json is gitignored)
-cp prisma/contacts.example.json prisma/contacts.json
-```
-
-Edit `prisma/contacts.json` and add entries for your clients. Use the short name as Gemini would extract it (e.g. `"iSoft"` not `"iSoft Software Technologies Pty Ltd"`):
-
-```json
-[
-  {
-    "name": "Client Short Name",
-    "phone": "+61400000000",
-    "abn": "12345678901",
-    "invoiceNumbers": ["INV-001", "INV-002"]
-  }
-]
-```
-
-- **`phone`** — leave empty (`""`) if unknown; fill it in and re-seed later
-- **`abn`** — optional; used as a lower-priority fallback match
-- **`invoiceNumbers`** — past invoice numbers for this client; enables the most precise match
-
-Then seed the database:
-
-```bash
-npm install    # installs tsx if you haven't already
-npm run db:seed
-```
-
-> `contacts.json` is gitignored — your client names and phone numbers are never committed.
-
-**Re-seeding:** edit `contacts.json` and run `npm run db:seed` again. Entries are upserted, so it's safe to run multiple times.
-
-### How the lookup works
-
-After parsing an invoice, if no phone number was extracted, Envoy queries `GET /api/contacts/lookup` using the parsed client name and invoice number. Matching priority:
-
-1. Invoice number (most precise — same document seen before)
-2. Normalized client name (exact)
-3. ABN (fallback — payment detail)
-4. Partial name match (if unambiguous)
-
-A small **"Found in contacts"** label appears below the phone field when the number came from the database. Editing the field manually clears it.
-
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -180,12 +130,9 @@ src/
 │   └── globals.css                  # Design tokens (cream/burgundy theme)
 ├── lib/
 │   ├── prisma.ts                    # DB client
-│   ├── vapi.ts                      # Vapi integration + system prompt builder
-│   └── vendor.ts                    # Vendor name/ABN normalization utilities
+│   └── vapi.ts                      # Vapi integration + system prompt builder
 prisma/
-├── schema.prisma                    # Call + Vendor models
-├── seed.ts                          # Seeds Vendor table from contacts.json
-└── contacts.example.json            # Template — copy to contacts.json and fill in
+└── schema.prisma                    # Call model
 ```
 
 ## The system prompt
