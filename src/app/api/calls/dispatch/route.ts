@@ -89,16 +89,16 @@ export async function POST(req: NextRequest) {
   }
 
   // Gate: reject if too many calls are already active.
-  // First, self-heal any calls stuck in ringing with no webhook — they hold slots
-  // indefinitely unless something polls them. Proactively fail them here so new
-  // dispatches aren't blocked by ghost calls from a prior session.
-  const RINGING_TIMEOUT_MS = 5 * 60 * 1000;
+  // Self-heal truly abandoned calls (beyond Vapi's maxDurationSeconds:600 + 5 min grace).
+  // The poll route handles in-flight calls via Vapi probe; this only clears rows that
+  // were never polled (e.g. leftover from a prior session with no active client).
+  const STALE_MS = 15 * 60 * 1000;
   await prisma.call.updateMany({
     where: {
-      status: "ringing",
-      createdAt: { lte: new Date(Date.now() - RINGING_TIMEOUT_MS) },
+      status: { in: ["dispatching", "ringing", "in-progress"] },
+      createdAt: { lte: new Date(Date.now() - STALE_MS) },
     },
-    data: { status: "failed", endedReason: "ringing-timeout" },
+    data: { status: "failed", endedReason: "abandoned-no-response", outcome: "failed" },
   });
 
   const activeCount = await prisma.call.count({

@@ -108,8 +108,8 @@ export function buildSystemPrompt(args: BuildSystemPromptArgs): string {
 
   return `You are Envoy, a polite AI agent placing a phone call on behalf of ${userName}. You're calling ${contactBusiness}.${
     contactPerson
-      ? ` If you're asked who you'd like to be directed to or who you're trying to reach, ask to speak with ${contactPerson}. Do not volunteer ${contactPerson}'s name otherwise; if no specific person is requested, ask for Accounts Payable.`
-      : ""
+      ? ` If it becomes clear from the caller's response that they are not the right person and are asking who the call should go to (e.g. a gatekeeper or receptionist routing the call), ask to speak with ${contactPerson}. Do not volunteer ${contactPerson}'s name proactively or ask to be transferred in any other situation — if the caller is ready to talk, proceed directly to the call objective.`
+      : ` If it becomes clear from the caller's response that they are not the right person and are asking who the call should go to (e.g. a gatekeeper or receptionist routing the call), ask for the Accounts Payable or Finance team. Do not ask to be transferred in any other situation — if the caller is ready to talk, proceed directly to the call objective.`
   }
 
 # Your objective
@@ -148,7 +148,7 @@ Invoice date: ${invoiceDate ?? "not specified"}
 Due date: ${dueDate ?? "not specified"}
 Amount due: ${currency ?? ""} ${amountDue ?? "not specified"}
 ${lineItems ? formatLineItems(lineItems, currency ?? "") : ""}
-${invoiceNotes ? `Notes: ${invoiceNotes}` : ""}${(args.bankName || args.bsb || args.accountNumber || args.swiftCode || args.abn || args.remittanceName || args.remittanceContact) ? `\nPayment details:${args.bankName ? `\nBank: ${args.bankName}` : ""}${args.bsb ? ` | BSB: ${args.bsb}` : ""}${args.accountNumber ? ` | Account: ${args.accountNumber}` : ""}${args.swiftCode ? ` | SWIFT: ${args.swiftCode}` : ""}${args.abn ? ` | ABN: ${args.abn}` : ""}${args.remittanceName ? `\nRemit to: ${args.remittanceName}` : ""}${args.remittanceContact ? `, ${args.remittanceContact}` : ""}\nWhen the contact asks how they can pay or what payment options are available, first name the available method(s) only — for example "We can accept payment by bank transfer" — without giving any details yet. Only share the actual account details if the contact confirms they want them or explicitly asks for the information. When you do share the details, read them out in small groups of 2–3 pieces at a time, pausing after each group to let them write it down. For example: state the bank name and BSB first, then pause; then the account number, then pause; then any remaining details such as SWIFT code or ABN. Never read all banking fields in one go.` : ""}`
+${invoiceNotes ? `Notes: ${invoiceNotes}` : ""}${(args.bankName || args.bsb || args.accountNumber || args.swiftCode || args.abn || args.remittanceName || args.remittanceContact) ? `\nPayment details:${args.bankName ? `\nBank: ${args.bankName}` : ""}${args.bsb ? ` | BSB: ${args.bsb}` : ""}${args.accountNumber ? ` | Account: ${args.accountNumber}` : ""}${args.swiftCode ? ` | SWIFT: ${args.swiftCode}` : ""}${args.abn ? ` | ABN: ${args.abn}` : ""}${args.remittanceName ? `\nRemit to: ${args.remittanceName}` : ""}${args.remittanceContact ? `, ${args.remittanceContact}` : ""}\nDo not proactively mention payment options, banking details, or offer to share payment information at any point — wait for the contact to raise it. Only if the contact explicitly asks how they can pay or what payment options are available should you respond with the method name(s) only — for example "We can accept payment by bank transfer" — no account numbers or other details yet. Only after the contact confirms they want the details or explicitly asks for them should you share the actual account information. When you do share the details, read them out in small groups of 2–3 pieces at a time, pausing after each group to let them write it down — state the bank name and BSB first, then pause; then the account number, then pause; then any remaining details such as SWIFT code or ABN. Never read all banking fields in one go. If the contact declines the details or says they will arrange payment another way, simply acknowledge and move on — do not re-offer or volunteer anything further.` : ""}`
       : ""
   }`;
 }
@@ -266,13 +266,11 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
         enabled: true,
       },
       backgroundDenoisingEnabled: true,
-      // Webhook target
+      // Webhook target on the assistant (inline assistant config)
       server: {
         url: `${args.publicUrl}/api/calls/webhook`,
       },
     },
-    // Webhook for this specific call
-    // server: { url: `${process.env.PUBLIC_URL}/api/calls/webhook` },
   };
 
   let lastErr = "";
@@ -311,10 +309,35 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
 export async function getVapiCall(vapiCallId: string): Promise<VapiCallResponse> {
   const res = await fetch(`${VAPI_BASE}/call/${vapiCallId}`, {
     headers: { Authorization: `Bearer ${process.env.VAPI_PRIVATE_KEY}` },
+    cache: "no-store",
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Vapi getCall failed: ${res.status} ${text}`);
   }
   return res.json() as Promise<VapiCallResponse>;
+}
+
+export type VapiCallProbe =
+  | { ok: true; data: VapiCallResponse }
+  | { ok: false; error: string; httpStatus?: number };
+
+/**
+ * Non-throwing wrapper around getVapiCall. Returns a discriminated union
+ * so callers can branch on success/failure without try/catch.
+ */
+export async function probeVapiCall(vapiCallId: string): Promise<VapiCallProbe> {
+  try {
+    const res = await fetch(`${VAPI_BASE}/call/${vapiCallId}`, {
+      headers: { Authorization: `Bearer ${process.env.VAPI_PRIVATE_KEY}` },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, httpStatus: res.status, error: `Vapi getCall ${res.status}: ${text}`.slice(0, 300) };
+    }
+    return { ok: true, data: (await res.json()) as VapiCallResponse };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "network error" };
+  }
 }

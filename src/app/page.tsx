@@ -78,6 +78,7 @@ interface BulkItem {
   callId?: string;
   callStatus?: Status;
   callOutcome?: Outcome;
+  callPollError?: string | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -1482,7 +1483,7 @@ function BulkItemRow({
   onRemove: () => void;
   onViewDetail?: () => void;
 }) {
-  const { status, file, parsed, error, callStatus, callOutcome } = item;
+  const { status, file, parsed, error, callStatus, callOutcome, callPollError } = item;
   const canDispatch = (status === "parsed" || status === "dispatch-error") &&
     hasCallableNumber(parsed?.toNumber);
   const isSettled = status === "dispatched" && (callStatus === "completed" || callStatus === "failed");
@@ -1538,7 +1539,12 @@ function BulkItemRow({
           {status === "dispatched" && !callStatus && (
             <span className="text-[0.78rem]" style={{ color: "var(--muted)" }}>Dispatched…</span>
           )}
-          {status === "dispatched" && callStatus && !isSettled && (
+          {status === "dispatched" && callStatus && !isSettled && callPollError && (
+            <span className="text-[0.78rem] font-medium px-2 py-0.5 rounded-full" style={{ background: "var(--warning-tint)", color: "var(--warning)" }}>
+              Vapi unreachable
+            </span>
+          )}
+          {status === "dispatched" && callStatus && !isSettled && !callPollError && (
             <span className="text-[0.78rem]" style={{ color: "var(--muted)" }}>
               {callStatus === "queued" ? "Connecting…" : callStatus === "ringing" ? "Ringing…" : "In conversation"}
             </span>
@@ -1762,11 +1768,18 @@ export default function EnvoyApp() {
       if (active.length === 0) return;
       await Promise.all(active.map(async (item) => {
         try {
-          const r = await fetch(`/api/calls/${item.callId}`);
-          if (!r.ok) return;
+          const r = await fetch(`/api/calls/${item.callId}`, { cache: "no-store" });
+          if (!r.ok) {
+            setBulkItems((prev) => prev.map((i) =>
+              i.uid === item.uid ? { ...i, callPollError: `Status check failed (HTTP ${r.status})` } : i
+            ));
+            return;
+          }
           const data = await r.json();
           setBulkItems((prev) => prev.map((i) =>
-            i.uid === item.uid ? { ...i, callStatus: data.status, callOutcome: data.outcome } : i
+            i.uid === item.uid
+              ? { ...i, callStatus: data.status, callOutcome: data.outcome, callPollError: data.pollError ?? null }
+              : i
           ));
         } catch { /* ignore */ }
       }));
@@ -1856,7 +1869,8 @@ export default function EnvoyApp() {
     setBulkItems((prev) => prev.filter((i) => i.uid !== uid));
   };
 
-  const openBulkCallDetail = (callId: string) => {
+  const openBulkCallDetail = async (callId: string) => {
+    await fetchCalls();
     setActiveCallId(callId);
     setReturnToBulk(true);
     setScreen("detail");

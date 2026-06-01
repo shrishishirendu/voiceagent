@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { companyNamesMatch } from "@/lib/nameUtils";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -26,10 +27,9 @@ export async function GET(req: NextRequest) {
     if (hit) return NextResponse.json({ phone: hit.toNumber, matchedBy: "invoice" });
   }
 
-  // (2) contactBusiness — case-insensitive business name match
+  // (2) contactBusiness — normalised + fuzzy business name match
   if (contactBusiness) {
-    const lower = contactBusiness.toLowerCase();
-    const hit = candidates.find((c) => c.contactBusiness?.toLowerCase() === lower);
+    const hit = candidates.find((c) => companyNamesMatch(c.contactBusiness ?? "", contactBusiness));
     if (hit) return NextResponse.json({ phone: hit.toNumber, matchedBy: "name" });
   }
 

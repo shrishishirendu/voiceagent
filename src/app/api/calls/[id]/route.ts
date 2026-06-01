@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getVapiCall } from "@/lib/vapi";
+import { probeVapiCall } from "@/lib/vapi";
 
 function deriveOutcome(endedReason?: string, successEval?: string): string {
   if (successEval) {
@@ -55,70 +55,73 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  let pollError: string | null = null;
+
   // If the call hasn't reached a terminal state, check Vapi directly.
-  // This makes status/transcript updates independent of webhook delivery.
+  // Always probe Vapi first — age-based auto-fail only fires when Vapi is unreachable.
   if (call.vapiCallId && call.status !== "completed" && call.status !== "failed") {
     const ageMs = Date.now() - new Date(call.createdAt).getTime();
-    const RINGING_TIMEOUT_MS = 5 * 60 * 1000;     // no real PSTN ring lasts 5 min
-    const IN_PROGRESS_TIMEOUT_MS = 12 * 60 * 1000; // maxDurationSeconds(600) + 2 min grace
+    const RINGING_TIMEOUT_MS    = 5 * 60 * 1000;
+    const IN_PROGRESS_TIMEOUT_MS = 12 * 60 * 1000;
 
-    if (call.status === "ringing" && ageMs > RINGING_TIMEOUT_MS) {
-      // Ringing for > 5 min means both webhook delivery and Vapi polling failed.
-      // Auto-fail so the call doesn't block the bulk dispatch queue indefinitely.
-      call = await prisma.call.update({
-        where: { id: call.id },
-        data: { status: "failed", endedReason: "ringing-timeout" },
-      });
-      console.log("[poll] auto-failed stuck ringing call", call.id, "age", Math.round(ageMs / 1000), "s");
-    } else if (call.status === "in-progress" && ageMs > IN_PROGRESS_TIMEOUT_MS) {
-      call = await prisma.call.update({
-        where: { id: call.id },
-        data: { status: "failed", endedReason: "duration-exceeded" },
-      });
-      console.log("[poll] auto-failed overdue in-progress call", call.id, "age", Math.round(ageMs / 1000), "s");
-    } else {
-      try {
-        const vapiData = await getVapiCall(call.vapiCallId) as VapiCallDetail;
-        console.log("[poll] Vapi returned status=%s for vapiCallId=%s", vapiData.status, call.vapiCallId);
+    const probe = await probeVapiCall(call.vapiCallId);
 
-        if (vapiData.status === "ended") {
-          const transcript = formatMessages(vapiData.artifact?.messages ?? vapiData.messages);
-          const summary = vapiData.analysis?.summary ?? (vapiData.summary as string | undefined) ?? null;
-          const endedReason = (vapiData.endedReason as string | undefined) ?? null;
-          const outcome = deriveOutcome(endedReason ?? undefined, vapiData.analysis?.successEvaluation);
-          const result = summary
-            ? summary.split(/[.\n]/).find((s: string) => s.trim().length > 10)?.trim() ?? null
-            : null;
+    if (probe.ok) {
+      const vapiData = probe.data as VapiCallDetail;
+      console.log("[poll] Vapi returned status=%s for vapiCallId=%s", vapiData.status, call.vapiCallId);
 
+      if (vapiData.status === "ended") {
+        const transcript = formatMessages(vapiData.artifact?.messages ?? vapiData.messages);
+        const summary = vapiData.analysis?.summary ?? (vapiData.summary as string | undefined) ?? null;
+        const endedReason = (vapiData.endedReason as string | undefined) ?? null;
+        const outcome = deriveOutcome(endedReason ?? undefined, vapiData.analysis?.successEvaluation);
+        const result = summary
+          ? summary.split(/[.\n]/).find((s: string) => s.trim().length > 10)?.trim() ?? null
+          : null;
+
+        call = await prisma.call.update({
+          where: { id: call.id },
+          data: {
+            status: "completed",
+            outcome,
+            summary,
+            transcript,
+            recordingUrl: vapiData.artifact?.recordingUrl ?? (vapiData.recordingUrl as string | undefined) ?? null,
+            durationSec: (vapiData.durationSeconds as number | undefined) ?? null,
+            endedReason,
+            result,
+          },
+        });
+        console.log("[poll] synced completed status from Vapi for", call.id);
+      } else if (vapiData.status) {
+        // Only advance — never regress. Prevents Vapi's early "queued" state from
+        // overwriting "ringing" that the dispatch route already set.
+        const currentRank = STATUS_RANK[call.status] ?? -1;
+        const newRank = STATUS_RANK[vapiData.status] ?? -1;
+        if (newRank > currentRank) {
           call = await prisma.call.update({
             where: { id: call.id },
-            data: {
-              status: "completed",
-              outcome,
-              summary,
-              transcript,
-              recordingUrl: vapiData.artifact?.recordingUrl ?? (vapiData.recordingUrl as string | undefined) ?? null,
-              durationSec: (vapiData.durationSeconds as number | undefined) ?? null,
-              endedReason,
-              result,
-            },
+            data: { status: vapiData.status },
           });
-          console.log("[poll] synced completed status from Vapi for", call.id);
-        } else if (vapiData.status) {
-          // Only advance — never regress. Prevents Vapi's early "queued" state from
-          // overwriting "ringing" that the dispatch route already set.
-          const currentRank = STATUS_RANK[call.status] ?? -1;
-          const newRank = STATUS_RANK[vapiData.status] ?? -1;
-          if (newRank > currentRank) {
-            call = await prisma.call.update({
-              where: { id: call.id },
-              data: { status: vapiData.status },
-            });
-          }
         }
-      } catch (err) {
-        // Vapi check failed — return what we have in the DB; don't error the poll
-        console.error("[poll] Vapi status check failed:", err);
+      }
+    } else {
+      // Vapi probe failed — surface the error; only auto-fail if also overdue
+      pollError = probe.error;
+      console.error("[poll] Vapi probe failed:", probe.error);
+
+      if (call.status === "ringing" && ageMs > RINGING_TIMEOUT_MS) {
+        call = await prisma.call.update({
+          where: { id: call.id },
+          data: { status: "failed", endedReason: "vapi-unreachable", outcome: "failed" },
+        });
+        console.log("[poll] auto-failed stuck ringing call (Vapi unreachable)", call.id, "age", Math.round(ageMs / 1000), "s");
+      } else if (call.status === "in-progress" && ageMs > IN_PROGRESS_TIMEOUT_MS) {
+        call = await prisma.call.update({
+          where: { id: call.id },
+          data: { status: "failed", endedReason: "vapi-unreachable", outcome: "failed" },
+        });
+        console.log("[poll] auto-failed overdue in-progress call (Vapi unreachable)", call.id, "age", Math.round(ageMs / 1000), "s");
       }
     }
   }
@@ -137,5 +140,6 @@ export async function GET(
     recordingUrl: call.recordingUrl,
     endedReason: call.endedReason,
     createdAt: call.createdAt,
-  });
+    pollError,
+  }, { headers: { "Cache-Control": "no-store" } });
 }

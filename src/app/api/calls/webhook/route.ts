@@ -94,6 +94,26 @@ export async function POST(req: NextRequest) {
   let call;
   try {
     call = await prisma.call.findUnique({ where: { vapiCallId } });
+    // Race: vapiCallId may arrive before the dispatch route writes it.
+    // Attempt to bind this event to the most recent unbound in-flight call (within 2 min).
+    // Safe under MAX_CONCURRENT_CALLS=1 — at most one unbound call at a time.
+    if (!call) {
+      const candidate = await prisma.call.findFirst({
+        where: {
+          vapiCallId: null,
+          status: { in: ["dispatching", "ringing"] },
+          createdAt: { gte: new Date(Date.now() - 2 * 60 * 1000) },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      if (candidate) {
+        call = await prisma.call.update({
+          where: { id: candidate.id },
+          data: { vapiCallId },
+        }).catch(() => null);
+        if (!call) call = await prisma.call.findUnique({ where: { vapiCallId } });
+      }
+    }
   } catch (err) {
     console.error("[webhook] findUnique failed", err);
     return NextResponse.json({ ok: false, error: "db error" }, { status: 500 });
