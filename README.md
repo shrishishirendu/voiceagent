@@ -1,25 +1,32 @@
 # Envoy
 
-AI agent that places phone calls on your behalf. Built on Next.js + Vapi + Twilio + Claude + Gemini.
+AI agent that places phone calls on your behalf. Built on Next.js + Vapi + Twilio + Claude + Gemini. Supports single calls, bulk invoice dispatch, and Google Drive invoice ingestion with automatic contact management.
+
+**Three flows:**
+
+| Flow | How to trigger |
+|---|---|
+| **Single call** | Fill in the brief manually → Dispatch |
+| **Invoice batch** | Select invoices (Drive tab or file upload) → parse with Gemini → dispatch one call per invoice |
+| **Retry failures** | After a batch settles, hit **Retry failed** — "no phone" items re-resolve from the spreadsheet first so adding a number and retrying is seamless |
+
+> When a call goes to voicemail, Envoy leaves a tailored message automatically and marks the call **No answer**.
 
 ## What you need before starting
 
-You should already have:
-- ✅ A Vapi account with a **private API key**
-- ✅ A Twilio account with **Account SID**, **Auth Token**, and a **phone number** (+1 815 283 5864 if you're following along)
+- ✅ A **Vapi** account with a private API key
+- ✅ A **Twilio** account with Account SID, Auth Token, and a phone number
 - ✅ Your own mobile **verified as a Caller ID in Twilio** (required for trial accounts)
-- ✅ An **Anthropic API key** from console.anthropic.com (for Claude — Vapi forwards call LLM requests to Anthropic)
-- ✅ A **Google Gemini API key** from aistudio.google.com (for invoice PDF parsing)
-- ✅ Node.js 18+ installed (`node --version` to check)
+- ✅ An **Anthropic** API key (console.anthropic.com) — Claude is the call AI brain
+- ✅ A **Google Gemini** API key (aistudio.google.com) — for invoice PDF parsing
+- ✅ A **Google Cloud** service account with Drive + Sheets API enabled (for Google Drive invoice flow)
+- ✅ Node.js 18+
 
 ## 1. Install
 
 ```bash
-cd envoy-backend
 npm install
 ```
-
-This auto-runs `prisma generate` so the database client is built.
 
 ## 2. Configure your environment
 
@@ -27,7 +34,7 @@ This auto-runs `prisma generate` so the database client is built.
 cp .env.example .env
 ```
 
-Open `.env` and fill in:
+Fill in `.env`:
 
 ```
 VAPI_PRIVATE_KEY=...
@@ -35,9 +42,14 @@ TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_PHONE_NUMBER=+18152835864
 ANTHROPIC_API_KEY=sk-ant-...
-GEMINI_API_KEY=    # from aistudio.google.com → API Keys
-PUBLIC_URL=        # leave blank for now, we'll set this in step 4
+GEMINI_API_KEY=...
+PUBLIC_URL=            # set in step 4
 DATABASE_URL="file:./envoy.db"
+
+# Google Drive (required for Drive invoice flow)
+GOOGLE_SERVICE_ACCOUNT_KEY={"type":"service_account",...}
+GOOGLE_DRIVE_FOLDER_ID=<your-folder-id>
+# GOOGLE_DRIVE_CONTACTS_SHEET_NAME=Business Contact Details   # optional override
 ```
 
 ## 3. Initialise the database
@@ -46,39 +58,17 @@ DATABASE_URL="file:./envoy.db"
 npx prisma db push
 ```
 
-This creates `envoy.db` and the `Call` table.
-
 ## 4. Get a public URL for webhooks (local dev)
 
-Vapi needs to POST webhooks back to your machine when calls end. Your laptop isn't on the public internet, so we use **ngrok** to make it reachable.
+Vapi POSTs webhooks to your machine when calls end. Use **ngrok** to expose it:
 
-### Install ngrok (one-time)
-```bash
-brew install ngrok           # macOS
-# OR download from https://ngrok.com/download
-```
-
-You'll need to sign up at ngrok.com (free) and run:
-```bash
-ngrok config add-authtoken YOUR_NGROK_TOKEN
-```
-
-### Start ngrok in a separate terminal
 ```bash
 ngrok http 3000
 ```
 
-You'll see something like:
-```
-Forwarding   https://abc123xyz.ngrok-free.app -> http://localhost:3000
-```
+Copy the `https://...ngrok-free.app` URL into `.env` as `PUBLIC_URL`.
 
-**Copy that `https://...ngrok-free.app` URL** and paste it into `.env`:
-```
-PUBLIC_URL=https://abc123xyz.ngrok-free.app
-```
-
-> ⚠️ Each time you restart ngrok the URL changes. Update `.env` and restart `npm run dev` whenever this happens. (Or pay $8/mo for a static domain.)
+> Each time you restart ngrok the URL changes — update `.env` and restart `npm run dev`.
 
 ## 5. Run the app
 
@@ -86,32 +76,87 @@ PUBLIC_URL=https://abc123xyz.ngrok-free.app
 npm run dev
 ```
 
-Open **http://localhost:3000** in your browser. You should see Envoy with no calls yet.
+Open **http://localhost:3000**.
 
-## 6. Place your first call
+---
 
-1. Tap **Place a new call**
-2. Fill in:
-   - **Number to call**: your own verified mobile (e.g. `+61 4xx xxx xxx`)
-   - **Contact**: e.g. "Me, testing"
-   - **Your name**: what you want Envoy to call you
-   - **Objective**: try → `"Confirm this is a working test call. Ask me what I had for breakfast, and respond appropriately. Then end the call."`
-3. Pick a voice and manner.
-4. Tap **Dispatch Envoy**.
-5. Your phone will ring within ~5 seconds. Pick up and talk!
-6. When the call ends, the summary appears in the app.
+## Google Drive integration setup
+
+The Drive invoice flow requires a Google Cloud service account and a contacts spreadsheet. One-time setup:
+
+### 5a. Create a Google Cloud service account
+
+1. Go to **console.cloud.google.com → IAM & Admin → Service Accounts**
+2. Create a new service account, then create a **JSON key** for it
+3. Paste the entire JSON (single line) as `GOOGLE_SERVICE_ACCOUNT_KEY` in `.env`
+4. In the Google Cloud console, enable two APIs for your project:
+   - **Google Drive API** (`drive.googleapis.com`)
+   - **Google Sheets API** (`sheets.googleapis.com`)
+
+### 5b. Set up your Drive folder
+
+1. Create (or designate) a Google Drive folder for invoices
+2. **Share that folder** with the service account's `client_email` address as **Editor**
+3. Copy the folder ID from the URL (`https://drive.google.com/drive/folders/<FOLDER_ID>`) into `GOOGLE_DRIVE_FOLDER_ID`
+4. Upload your invoice PDFs into this folder
+
+### 5c. Create the contacts spreadsheet
+
+1. Inside the same folder, create a **native Google Sheet** (not an uploaded .xlsx) named exactly:
+   ```
+   Business Contact Details
+   ```
+2. Add a header row in row 1. Minimum required columns:
+   ```
+   Business Name | ABN | Phone
+   ```
+   Optional additional columns (recommended):
+   ```
+   Email | Contact Person
+   ```
+3. **Share the spreadsheet** with the service account `client_email` as **Editor** (separate from the folder share)
+4. Leave the Phone column blank — Envoy fills in Business Name and ABN from invoices; you add phone numbers manually
+
+### Phone number format in the spreadsheet
+
+You do **not** need a leading `+` — the app normalises numbers to E.164 automatically:
+
+| You type | Sent to Twilio |
+|---|---|
+| `0412345678` | `+61412345678` |
+| `61412345678` | `+61412345678` |
+| `+61412345678` | `+61412345678` |
+| `04 1234 5678` | `+61412345678` |
+
+> Google Sheets treats a leading `+` as a formula and rejects it. Just type the number without it.
+
+### How the contact flow works
+
+1. **Dispatch invoices** → the app parses each PDF, extracts business names + ABN, and writes any new businesses to the spreadsheet (Phone left blank)
+2. **Add phone numbers** in the spreadsheet for each business you want to call
+3. **Retry / re-dispatch** → the app resolves the phone from the sheet and places the call
+
+Phone resolution priority per invoice: **spreadsheet Phone column** → **number found in the PDF** → fail with "No phone number found — add it to the spreadsheet"
+
+---
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| "Dispatch failed: 401" from Vapi | Wrong `VAPI_PRIVATE_KEY` |
-| "Number not verified" error | Trial Twilio — verify the destination number in Twilio Console |
-| Phone rings but call drops immediately | Vapi can't reach Twilio — check Twilio SID/Auth Token |
-| Call connects but no AI voice | Anthropic key invalid, OR ElevenLabs voice ID issue (check `src/lib/vapi.ts`) |
-| Call completes but no summary | Webhook not reaching your machine. Verify `PUBLIC_URL` matches your live ngrok URL, and ngrok is still running |
-| Invoice parsing fails | `GEMINI_API_KEY` missing or invalid — check aistudio.google.com |
-| ngrok shows "tunnel offline" | Restart it. Free tier is sometimes flaky. |
+| "Dispatch failed: 401" | Wrong `VAPI_PRIVATE_KEY` |
+| "Number not verified" | Trial Twilio — verify the destination in Twilio Console |
+| Phone rings but call drops | Vapi can't reach Twilio — check SID/Auth Token |
+| Call connects but no AI voice | Anthropic key invalid, or ElevenLabs voice ID issue |
+| Call completes but no summary | `PUBLIC_URL` doesn't match live ngrok URL, or ngrok isn't running |
+| Invoice parsing fails | `GEMINI_API_KEY` missing or invalid |
+| Drive tab shows no files | `GOOGLE_DRIVE_FOLDER_ID` wrong, or Drive API not enabled, or folder not shared with service account |
+| Contacts spreadsheet not updating | Sheets API not enabled in Google Cloud, or the sheet isn't shared with the service account as **Editor** |
+| Spreadsheet writes to wrong file | You have both a `.xlsx` and a native Google Sheet with the same name — the app prefers the native Sheet; delete the stale `.xlsx` |
+| Invoices stuck at "Ready" | Phone number in the sheet wasn't picked up — hit **Retry failed** after adding numbers |
+| `+` rejected in Google Sheets | Don't use `+` — type `61412345678` or `0412345678` instead |
+
+---
 
 ## File map
 
@@ -119,57 +164,67 @@ Open **http://localhost:3000** in your browser. You should see Envoy with no cal
 src/
 ├── app/
 │   ├── api/calls/
-│   │   ├── dispatch/route.ts        # POST: place a new call via Vapi
-│   │   ├── webhook/route.ts         # POST: receives Vapi events (call ended, etc.)
-│   │   ├── route.ts                 # GET:  list all calls (home screen)
-│   │   └── [id]/route.ts            # GET:  single call (polled by live screen)
+│   │   ├── dispatch/route.ts           # POST: place a call via Vapi (phone normalisation here)
+│   │   ├── webhook/route.ts            # POST: receives Vapi events
+│   │   ├── route.ts                    # GET:  list all calls
+│   │   ├── [id]/route.ts               # GET:  single call (polled by live screen)
+│   │   └── parse-document/route.ts     # POST: parse invoice PDF via Gemini
+│   ├── api/drive/
+│   │   ├── invoices/route.ts           # GET:  list PDFs in Drive folder
+│   │   ├── contacts/route.ts           # GET/POST: read/write Business Contact Details sheet
+│   │   └── invoice-file/route.ts       # GET:  download a PDF by fileId
 │   ├── api/contacts/
-│   │   └── lookup/route.ts          # GET:  look up client phone by name/invoice
-│   ├── page.tsx                     # The Envoy UI (Home/Compose/Live/Detail)
-│   ├── layout.tsx                   # Root layout, fonts
-│   └── globals.css                  # Design tokens (cream/burgundy theme)
+│   │   └── lookup/route.ts             # GET:  look up client phone by name/invoice
+│   ├── page.tsx                        # The entire Envoy UI (all screens)
+│   ├── layout.tsx
+│   └── globals.css
 ├── lib/
-│   ├── prisma.ts                    # DB client
-│   └── vapi.ts                      # Vapi integration + system prompt builder
+│   ├── drive.ts                        # Google Drive + Sheets integration
+│   ├── nameUtils.ts                    # Fuzzy company name matching
+│   ├── prisma.ts
+│   └── vapi.ts                         # Vapi integration + system prompt builder
 prisma/
-└── schema.prisma                    # Call model
+└── schema.prisma
 ```
+
+---
 
 ## The system prompt
 
-The "brain" of Envoy lives in `src/lib/vapi.ts` → `buildSystemPrompt()`. This is what tells Claude how to behave on calls. Tweak it freely — this is where 80% of the product quality lives.
+`src/lib/vapi.ts → buildSystemPrompt()` is the AI brain. Tweak it to change call behaviour — this is where most of the product quality lives.
 
-## Deploying to Vercel (when you're ready)
+---
+
+## Deploying to Vercel
 
 ```bash
 npm install -g vercel
 vercel
 ```
 
-Follow the prompts. Once deployed:
-1. Set the same env vars in Vercel Dashboard → Project Settings → Environment Variables
-2. Set `PUBLIC_URL` to your Vercel URL (e.g. `https://envoy-xyz.vercel.app`)
-3. Redeploy
+Set the same env vars in Vercel Dashboard → Project Settings → Environment Variables, including all `GOOGLE_*` vars. Set `PUBLIC_URL` to your Vercel deployment URL.
 
-> ⚠️ Vercel's serverless DB doesn't persist SQLite. For production, swap to Postgres (Vercel Postgres or Supabase). Edit `prisma/schema.prisma` → `provider = "postgresql"` and update `DATABASE_URL`.
+> SQLite doesn't work on Vercel serverless. Swap `prisma/schema.prisma` → `provider = "postgresql"` and update `DATABASE_URL` to a Postgres connection string (Vercel Postgres or Supabase).
 
-## What this app does *not* do (yet)
+---
 
-- Live transcript streaming (transcript only appears after call ends — Vapi supports live websocket transcripts, can add later)
+## What this app does not do (yet)
+
+- Live transcript streaming (appears after call ends — Vapi supports live websocket transcripts)
 - Call recording playback in-app (link only — could embed an audio player)
 - Multi-user / auth (single-user tool — add NextAuth if needed)
 - Calendar integrations / SMS follow-ups
-- Calling from a real AU number (you'll need to upgrade Twilio and complete AU regulatory verification)
+- Calling from a real AU number (requires Twilio upgrade + AU regulatory verification)
 
-These are all 1–2 day adds. Open issues, not blockers.
+---
 
 ## Cost per call (rough)
 
-- Twilio outbound (US to AU mobile): ~$0.20/min
+- Twilio outbound (US → AU mobile): ~$0.20/min
 - Vapi platform fee: ~$0.05/min
-- Deepgram (STT): ~$0.005/min (included in Vapi)
-- ElevenLabs (TTS): ~$0.06/min (included in Vapi)
-- Claude (LLM): ~$0.01/min (via your Anthropic key)
+- Deepgram STT: ~$0.005/min (included in Vapi)
+- ElevenLabs TTS: ~$0.06/min (included in Vapi)
+- Claude LLM: ~$0.01/min (via your Anthropic key)
 
-**~$0.32/min** for a US→AU call. Most personal calls are 2–4 mins → ~$1–1.30 each.
-For AU→AU once you have a real AU number, that drops to ~$0.12/min.
+**~$0.32/min** for US→AU. Most calls are 2–4 mins → ~$0.65–1.30 each.
+AU→AU with a real AU number drops to ~$0.12/min.
