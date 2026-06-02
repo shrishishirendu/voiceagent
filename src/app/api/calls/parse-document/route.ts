@@ -12,7 +12,7 @@ Rules for vendorName and contactBusiness: extract only the distinctive brand or 
 
 invoiceNotes: include only notes specific and directly relevant to THIS invoice — special payment instructions, dispute resolution contacts, or custom terms agreed for this deal. Omit standard legal boilerplate, generic T&Cs, GST/VAT/tax disclaimers, and any text that appears identically on every invoice. Return null if no genuinely relevant notes exist.
 
-Return null for any field not found. Never invent information.`;
+Return all dates (invoiceDate, dueDate) in YYYY-MM-DD format regardless of how they appear in the document. Return null for any field not found. Never invent information.`;
 
 const LineItemSchema = z.object({
   description: z.string().nullable(),

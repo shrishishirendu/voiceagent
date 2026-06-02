@@ -144,6 +144,10 @@ const fmtAmount = (currency: string | null | undefined, amount: number | null | 
 const fmtDate = (dateStr: string | null | undefined): string => {
   if (!dateStr) return "";
   const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const monthIndex: Record<string, number> = {
+    january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11,
+    jan:0,feb:1,mar:2,apr:3,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11,
+  };
   const s = dateStr.trim();
   // YYYY-MM-DD
   const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
@@ -152,12 +156,27 @@ const fmtDate = (dateStr: string | null | undefined): string => {
     if (mi < 0 || mi > 11) return s;
     return `${parseInt(iso[3], 10)} ${months[mi]} ${iso[1]}`;
   }
-  // D/M/YYYY or DD/MM/YYYY (AU format used by Gemini for non-ISO dates)
-  const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
-  if (dmy) {
-    const mi = parseInt(dmy[2], 10) - 1;
-    if (mi < 0 || mi > 11) return s;
-    return `${parseInt(dmy[1], 10)} ${months[mi]} ${dmy[3]}`;
+  // slash-separated: try D/M/YYYY (AU) first; if month field > 12 assume M/D/YYYY (US)
+  const slashDate = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (slashDate) {
+    const d1 = parseInt(slashDate[1], 10), d2 = parseInt(slashDate[2], 10), yr = slashDate[3];
+    const miAU = d2 - 1; // D/M/YYYY → month is second group
+    if (miAU >= 0 && miAU <= 11) return `${d1} ${months[miAU]} ${yr}`;
+    const miUS = d1 - 1; // M/D/YYYY → month is first group
+    if (miUS >= 0 && miUS <= 11) return `${d2} ${months[miUS]} ${yr}`;
+    return s;
+  }
+  // "Month D, YYYY" or "Month D YYYY" (e.g. "April 15, 2026")
+  const longMDY = /^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/.exec(s);
+  if (longMDY) {
+    const mi = monthIndex[longMDY[1].toLowerCase()];
+    if (mi !== undefined) return `${parseInt(longMDY[2], 10)} ${months[mi]} ${longMDY[3]}`;
+  }
+  // "D Month YYYY" (e.g. "31 May 2026") — already our target format, pass through
+  const longDMY = /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/.exec(s);
+  if (longDMY) {
+    const mi = monthIndex[longDMY[2].toLowerCase()];
+    if (mi !== undefined) return `${parseInt(longDMY[1], 10)} ${months[mi]} ${longDMY[3]}`;
   }
   return s;
 };
@@ -196,7 +215,7 @@ const buildBulkBrief = (parsed: InvoiceParseResult): Record<string, unknown> => 
   contactPerson: parsed.contactPerson ?? undefined,
   toNumber: parsed.toNumber!,
   objective: generateInvoiceObjective(parsed),
-  voice: "marcus",
+  voice: "iris",
   manner: "warm",
   userName: parsed.vendorName || "the caller",
   invoiceNumber: parsed.invoiceNumber ?? undefined,
@@ -425,7 +444,7 @@ function Compose({ onCancel, onPlace }: { onCancel: () => void; onPlace: (b: any
   const [number, setNumber] = useState("+61 ");
   const [contact, setContact] = useState("");
   const [objective, setObjective] = useState("");
-  const [voice, setVoice] = useState("marcus");
+  const [voice, setVoice] = useState("iris");
   const [manner, setManner] = useState("warm");
   const [userName, setUserName] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -640,7 +659,7 @@ function InvoiceCompose({
   const [contactBusiness, setContactBusiness] = useState(pre?.contactBusiness ?? "");
   const [contactPerson, setContactPerson] = useState(pre?.contactPerson ?? "");
   const [objective, setObjective] = useState(() => (pre ? generateInvoiceObjective(pre) : ""));
-  const [voice, setVoice] = useState("marcus");
+  const [voice, setVoice] = useState("iris");
   const [manner, setManner] = useState("warm");
   const [userName, setUserName] = useState(pre?.vendorName ?? "");
   const [invoiceNumber, setInvoiceNumber] = useState(pre?.invoiceNumber ?? "");
@@ -866,7 +885,7 @@ function InvoiceCompose({
 
             {parseError && (
               <div className="mt-5 p-4 rounded-md text-[0.9rem] leading-snug" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>
-                <strong className="block mb-1">Parsing failed</strong>
+                <strong className="block mb-1">Reading failed</strong>
                 {parseError}
                 <button
                   onClick={parseInvoice}
@@ -894,7 +913,7 @@ function InvoiceCompose({
                 opacity: documentFile && !parsing ? 1 : 0.7,
               }}
             >
-              {parsing ? "Parsing invoice..." : "Upload and parse invoice"}
+              {parsing ? "Reading invoice..." : "Upload and read invoice"}
             </button>
           </div>
         </>
@@ -1440,14 +1459,16 @@ function Live({
 
 function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
   const oc = outcomeStyle(call.outcome);
+  const VOICEMAIL_PHRASES = /audio message|leave a message|leave your message|not available|unavailable|voicemail|answering machine|at the tone|after the beep|record your message|send a message/i;
   const isVoicemail = !!(
-    call.endedReason && /voicemail|machine/i.test(call.endedReason)
+    (call.endedReason && /voicemail|machine/i.test(call.endedReason)) ||
+    (call.transcript ?? []).some((l) => l.who === "them" && VOICEMAIL_PHRASES.test(l.text))
   );
   const isInvoice = !!call.invoiceNumber;
 
-  // For voicemail calls, only show Envoy's spoken lines (the message left).
+  // For voicemail calls, show only the last Envoy line — the actual message left.
   const voicemailLines = isVoicemail
-    ? (call.transcript ?? []).filter((l) => l.who === "envoy")
+    ? (call.transcript ?? []).filter((l) => l.who === "envoy").slice(-1)
     : [];
 
   return (
@@ -1642,7 +1663,7 @@ function BulkItemRow({
 
         <div className="flex items-center gap-2 shrink-0">
           {status === "parsing" && (
-            <span className="text-[0.78rem]" style={{ color: "var(--muted)" }}>Parsing…</span>
+            <span className="text-[0.78rem]" style={{ color: "var(--muted)" }}>Reading…</span>
           )}
           {status === "dispatching" && (
             <span className="text-[0.78rem]" style={{ color: "var(--muted)" }}>Dispatching…</span>
@@ -1763,7 +1784,7 @@ function BulkInvoiceScreen({
         </h1>
         {items.length > 0 && (
           <p className="text-[0.82rem] mt-3" style={{ color: "var(--muted)" }}>
-            {parsing > 0 ? `${parsing} parsing…` : null}
+            {parsing > 0 ? `${parsing} reading…` : null}
             {parsing > 0 && dispatched > 0 ? " · " : null}
             {dispatched > 0 ? `${dispatched} dispatched` : null}
             {parsing === 0 && dispatched === 0 ? `${items.length} invoice${items.length !== 1 ? "s" : ""}` : null}
@@ -2103,6 +2124,17 @@ function BulkSummaryScreen({
   const failedCount = items.filter(isFailedItem).length;
   const showRetry = !anyInProgress && failedCount > 0;
 
+  const answeredCount = items.filter((i) => i.callOutcome === "success" || i.callOutcome === "partial").length;
+  const noAnswerCount = items.filter((i) => i.callOutcome === "no-answer").length;
+  const errorCount = items.filter((i) =>
+    i.callOutcome === "failed" || i.status === "dispatch-error" || i.status === "parse-error"
+  ).length;
+  const inProgressCount = items.filter((i) => {
+    if (i.callStatus === "completed" || i.callStatus === "failed") return false;
+    if (i.status === "parse-error" || i.status === "dispatch-error") return false;
+    return true;
+  }).length;
+
   const getSummaryBadge = (item: BulkItem) => {
     // Terminal: show outcome
     if (item.callStatus === "completed" || item.callStatus === "failed") {
@@ -2120,7 +2152,7 @@ function BulkSummaryScreen({
     if (item.status === "parse-error") return { label: "Parse error", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
     if (item.status === "parsed") return { label: "Ready", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
     // Default: parsing
-    return { label: "Parsing…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
+    return { label: "Reading…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
   };
 
   return (
@@ -2137,10 +2169,39 @@ function BulkSummaryScreen({
 
       <div className="px-6 mb-6">
         <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Dispatch summary</p>
-        <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight">
+        <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight mb-4">
           {items.length} invoice{items.length !== 1 ? "s" : ""},<br />
-          <span className="italic" style={{ color: "var(--burgundy)" }}>in progress.</span>
+          <span className="italic" style={{ color: "var(--burgundy)" }}>
+            {anyInProgress ? "in progress." : "done."}
+          </span>
         </h1>
+
+        {/* Stats row */}
+        <div className="flex gap-2 flex-wrap">
+          {answeredCount > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full" style={{ background: "var(--success-tint, #e8f5e9)", color: "var(--success, #2e7d32)" }}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              <span className="text-[0.78rem] font-medium">{answeredCount} answered</span>
+            </div>
+          )}
+          {noAnswerCount > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full" style={{ background: "var(--cream-dark)", color: "var(--muted)" }}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 3v3.5l2 1.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/><circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.4"/></svg>
+              <span className="text-[0.78rem] font-medium">{noAnswerCount} no answer</span>
+            </div>
+          )}
+          {errorCount > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 4v3M6 8.5v.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/><circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.4"/></svg>
+              <span className="text-[0.78rem] font-medium">{errorCount} failed</span>
+            </div>
+          )}
+          {inProgressCount > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full dot-pulse" style={{ background: "var(--cream-dark)", color: "var(--muted)" }}>
+              <span className="text-[0.78rem] font-medium">{inProgressCount} in progress</span>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="px-6 flex flex-col gap-3">
@@ -2549,13 +2610,21 @@ export default function EnvoyApp() {
     }
   };
 
-  // Parse → sync spreadsheet → resolve phones → dispatch for a given set of item UIDs
+  // Parse → resolve phone → dispatch for each item as soon as it's ready.
+  // Contacts are pre-loaded once so each item can dispatch immediately after parsing
+  // without waiting for all other items to finish.
   const runInvoicePipeline = async (uids: string[]) => {
     const uidSet = new Set(uids);
     const targets = bulkItemsRef.current.filter((i) => uidSet.has(i.uid));
 
-    // 1. Parse all targeted items concurrently (capped).
-    // Collect results in a local map so step 2 doesn't depend on the (async) ref sync.
+    // 1. Pre-load contact rows so each item can resolve its phone immediately after parsing.
+    let contactRows: ContactRow[] = [];
+    try {
+      const cr = await fetch("/api/drive/contacts", { cache: "no-store" });
+      if (cr.ok) contactRows = (await cr.json()).rows ?? [];
+    } catch {}
+
+    // 2. Parse each item concurrently (capped); resolve phone and dispatch as soon as each is done.
     const parsedResults = new Map<string, InvoiceParseResult>();
     const sem = createSemaphore(CONCURRENT_CALL_LIMIT);
     await Promise.all(targets.map((item) => sem(async () => {
@@ -2568,17 +2637,61 @@ export default function EnvoyApp() {
         const payload = await r.json() as InvoiceParseResult & { error?: string };
         if (!r.ok) throw new Error(payload.error ?? `HTTP ${r.status}`);
         parsedResults.set(item.uid, payload);
-        setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? { ...i, status: "parsed", parsed: payload } : i));
+
+        // Resolve phone immediately from pre-loaded contacts or PDF.
+        const match = contactRows.find((row) => companyNamesMatch(row.businessName, payload.contactBusiness ?? ""));
+        const sheetPhone = match?.phone || null;
+        const pdfPhone = hasCallableNumber(payload.toNumber) ? payload.toNumber : null;
+        const phone = sheetPhone ?? pdfPhone;
+        const person = match?.contactPerson || payload.contactPerson || null;
+
+        if (!phone) {
+          const updated: BulkItem = {
+            ...item,
+            status: "dispatch-error",
+            error: "No phone number found — add it to the spreadsheet",
+            phoneSource: "none",
+            parsed: payload,
+          };
+          bulkItemsRef.current = bulkItemsRef.current.map((i) => i.uid === item.uid ? updated : i);
+          setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? updated : i));
+          return;
+        }
+
+        const resolved: BulkItem = {
+          ...item,
+          status: "parsed",
+          parsed: { ...payload, toNumber: phone, contactPerson: person },
+          phoneSource: sheetPhone ? "spreadsheet" : "pdf",
+        };
+        bulkItemsRef.current = bulkItemsRef.current.map((i) => i.uid === item.uid ? resolved : i);
+        setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? resolved : i));
+
+        // Dispatch immediately with backpressure retry.
+        const RETRY_WAIT = 2_000;
+        const MAX_RETRIES = 8;
+        let attempts = 0;
+        while (true) {
+          const result = await dispatchBulkItem(item.uid);
+          if (result !== false) break;
+          attempts++;
+          if (attempts >= MAX_RETRIES) {
+            setBulkItems((prev) => prev.map((i) =>
+              i.uid === item.uid ? { ...i, status: "dispatch-error", error: "Server at capacity — try again shortly" } : i
+            ));
+            break;
+          }
+          await new Promise((res) => setTimeout(res, RETRY_WAIT));
+        }
       } catch (err) {
         setBulkItems((prev) => prev.map((i) => i.uid === item.uid
-          ? { ...i, status: "parse-error", error: err instanceof Error ? err.message : "Parse failed" }
+          ? { ...i, status: "parse-error", error: err instanceof Error ? err.message : "Read failed" }
           : i
         ));
       }
     })));
 
-    // 2. Sync newly-discovered businesses to spreadsheet (awaited so step 3 reads fresh data).
-    // Build from parsedResults (not the ref) so every successfully-parsed business is included.
+    // 3. Sync newly-discovered businesses to the spreadsheet for future use.
     const discovered = Array.from(parsedResults.values())
       .filter((p) => p.contactBusiness)
       .map((p) => ({
@@ -2587,56 +2700,12 @@ export default function EnvoyApp() {
         contactPerson: p.contactPerson ?? null,
       }));
     if (discovered.length > 0) {
-      try {
-        const syncRes = await fetch("/api/drive/contacts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contacts: discovered }),
-        });
-        if (!syncRes.ok) {
-          const e = await syncRes.json().catch(() => ({}));
-          console.error("[contacts sync] write failed:", e.error ?? syncRes.status);
-        }
-      } catch (e) {
-        console.error("[contacts sync] fetch error:", e);
-      }
+      fetch("/api/drive/contacts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contacts: discovered }),
+      }).catch((e) => console.error("[contacts sync] fetch error:", e));
     }
-
-    // 3. Load spreadsheet rows for phone resolution
-    let contactRows: ContactRow[] = [];
-    try {
-      const cr = await fetch("/api/drive/contacts", { cache: "no-store" });
-      if (cr.ok) contactRows = (await cr.json()).rows ?? [];
-    } catch {}
-
-    // 4. Resolve phone per targeted item: spreadsheet > PDF.
-    // Build the resolved array from the authoritative parsedResults map and assign it to the
-    // ref synchronously, so the drain loop (step 5) sees the resolved phone numbers immediately
-    // rather than the stale ref (which lags behind setBulkItems until the next render).
-    const resolved = bulkItemsRef.current.map((i) => {
-      if (!uidSet.has(i.uid)) return i;
-      const parsed = parsedResults.get(i.uid);
-      if (!parsed) return i; // parse failed — leave the parse-error state set in step 1
-      const match = contactRows.find((r) => companyNamesMatch(r.businessName, parsed.contactBusiness ?? ""));
-      const sheetPhone = match?.phone || null;
-      const pdfPhone = hasCallableNumber(parsed.toNumber) ? parsed.toNumber : null;
-      const phone = sheetPhone ?? pdfPhone;
-      const person = match?.contactPerson || parsed.contactPerson || null;
-      if (!phone) {
-        return { ...i, status: "dispatch-error" as BulkStatus, error: "No phone number found — add it to the spreadsheet", phoneSource: "none" as const, parsed };
-      }
-      return {
-        ...i,
-        status: "parsed" as BulkStatus,
-        parsed: { ...parsed, toNumber: phone, contactPerson: person },
-        phoneSource: (sheetPhone ? "spreadsheet" : "pdf") as "spreadsheet" | "pdf",
-      };
-    });
-    bulkItemsRef.current = resolved;
-    setBulkItems(resolved);
-
-    // 5. Dispatch with backpressure drain
-    await drainDispatch();
   };
 
   // One-click dispatch from SelectInvoiceScreen.

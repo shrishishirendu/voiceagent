@@ -147,23 +147,33 @@ export async function POST(req: NextRequest) {
     case "end-of-call-report": {
       const transcript = formatTranscript(msg.artifact?.messages ?? msg.messages);
       const endedReason = msg.endedReason ?? null;
-      const isVoicemail = endedReason
-        ? /voicemail|machine/i.test(endedReason)
-        : false;
 
-      // For voicemail calls Vapi often sends no summary — synthesise a clear one.
-      const rawSummary = msg.analysis?.summary ?? msg.summary ?? null;
+      // Detect voicemail from endedReason OR from transcript content (Google Voice / audio-message
+      // systems often don't trigger Vapi's machine detection, so we also scan what the other party said).
+      const rawMessages = msg.artifact?.messages ?? msg.messages ?? [];
+      const VOICEMAIL_RE = /audio message|leave a message|leave your message|not available|unavailable|voicemail|answering machine|at the tone|after the beep|record your message|send a message/i;
+      const transcriptHasVoicemail = rawMessages.some(
+        (m) => m.role === "user" && VOICEMAIL_RE.test(m.message ?? m.content ?? "")
+      );
+      const isVoicemailDetected = !!(endedReason && /voicemail|machine/i.test(endedReason)) || transcriptHasVoicemail;
+
+      // For voicemail calls, discard the analysisPlan summary — it reads "As an audio message"
+      // as if the contact said it, producing misleading text. Use our own description instead.
+      const rawSummary = isVoicemailDetected
+        ? null
+        : (msg.analysis?.summary ?? msg.summary ?? null);
       const summary = rawSummary ??
-        (isVoicemail
-          ? `Envoy called ${call.contactBusiness} but the call went to voicemail. A message was left.`
+        (isVoicemailDetected
+          ? `Envoy placed a call to ${call.contactBusiness} but the contact didn't pick up and the call was redirected to voicemail. A message was left. Expecting a call back or will follow up.`
           : null);
 
       const recordingUrl = msg.artifact?.recordingUrl ?? msg.recordingUrl ?? null;
       const durationSec = msg.durationSeconds ?? null;
-      const outcome = deriveOutcome(
-        endedReason ?? undefined,
-        msg.analysis?.successEvaluation
-      );
+      // For transcript-detected voicemail, override outcome to "no-answer" (endedReason may say
+      // "silence-timed-out" or similar which would otherwise produce "failed" or "success").
+      const outcome = isVoicemailDetected
+        ? "no-answer"
+        : deriveOutcome(endedReason ?? undefined, msg.analysis?.successEvaluation);
 
       // Try to extract a one-line "result" from the summary
       const result = summary

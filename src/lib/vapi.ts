@@ -114,6 +114,11 @@ export function buildSystemPrompt(args: BuildSystemPromptArgs): string {
     invoiceNotes,
   } = args;
 
+  // Explicit voicemail script so the AI says something useful rather than "Goodbye."
+  const vmScript = invoiceNumber
+    ? `Hi, this is a message for ${contactBusiness}. Envoy is calling on behalf of ${userName} regarding an outstanding invoice${amountDue != null ? ` of ${fmtAmount(currency, amountDue)}` : ""}${dueDate ? `, due ${dueDate}` : ""}. Please give us a call back at your earliest convenience. Thank you.`
+    : `Hi, this is a message for ${contactBusiness}. Envoy is calling on behalf of ${userName}. We tried to reach you but weren't able to connect. Please give us a call back at your earliest convenience. Thank you.`;
+
   return `You are Envoy, a polite AI agent placing a phone call on behalf of ${userName}. You're calling ${contactBusiness}.${
     contactPerson
       ? ` If it becomes clear from the caller's response that they are not the right person and are asking who the call should go to (e.g. a gatekeeper or receptionist routing the call), ask to speak with ${contactPerson}. Do not volunteer ${contactPerson}'s name proactively or ask to be transferred in any other situation — if the caller is ready to talk, proceed directly to the call objective.`
@@ -143,6 +148,9 @@ Today is ${new Date().toISOString().split("T")[0]}. When the invoice is overdue 
 
 # Ending the call
 When the objective is resolved (success OR a clear no), say a natural farewell (e.g. "Great, I'll let you go — goodbye!") then immediately use the endCall function to hang up. Don't wait for the other person to hang up first. Don't drag it out.
+
+# Voicemail / answering machine
+If you hear a beep, hear phrases like "audio message", "leave a message", "record your message", "send a message after the tone", "not available", "unavailable", or any other sign that you have reached a voicemail or automated recording system: say the following word for word — "${vmScript}" — then immediately use the endCall function to hang up. Do not say anything else. Do not wait.
 
 # Opening line
 Your opening line has already been delivered: "Hi, this is Envoy calling on behalf of ${userName}. Is now an okay time for a quick chat?" Once they confirm, briefly state the purpose of the call in plain terms — do not repeat the greeting.${
@@ -284,7 +292,7 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
       // For invoice calls, ask Vapi's post-call AI to produce a factual, call-specific summary.
       ...(args.invoiceNumber ? {
         analysisPlan: {
-          summaryPrompt: `Summarize this call outcome in 2–3 sentences. Focus only on what was actually discussed and agreed — do not invent or assume. Include any concrete details that came up: dates, amounts, reference numbers, contact names, reasons given, follow-up steps. If the call went to voicemail or the contact wasn't available, state that clearly. Be factual and concise — no padding.`,
+          summaryPrompt: `Write a 1–2 sentence outcome summary as a brief status note. Start with "Envoy placed a call to [business name] for [e.g. 'an overdue invoice of $X']." Then state what happened — payment promised (and when), voicemail left, contact unavailable, dispute raised, etc. Include only concrete details: dates, amounts, follow-up commitments. No hedging phrases like "it appears" or "it seems". No padding.`,
         },
       } : {}),
     },
