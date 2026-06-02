@@ -7,6 +7,21 @@ const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
 const ACTIVE_CUTOFF_MS = 13 * 60 * 1000;
 
+// Normalise a phone number to E.164 (Twilio requires the leading "+").
+// Defaults to Australia (AU) so numbers can be entered without the "+",
+// which Google Sheets otherwise treats as a formula.
+//   +61412345678 → +61412345678   (already E.164, kept as-is)
+//   61412345678  → +61412345678   (country code without +)
+//   0412345678   → +61412345678   (AU national, leading 0 → +61)
+//   any other    → +<digits>      (assume country code is present)
+function normalisePhone(raw: string): string {
+  const n = raw.trim().replace(/[ \-().]/g, "");
+  if (n.startsWith("+")) return n;
+  if (n.startsWith("0")) return "+61" + n.slice(1);
+  if (n.startsWith("61")) return "+" + n;
+  return "+" + n;
+}
+
 const BriefSchema = z.object({
   contactBusiness: z.string().min(1).max(120),
   contactPerson: z.string().max(120).optional(),
@@ -70,7 +85,7 @@ export async function POST(req: NextRequest) {
     remittanceName,
     remittanceContact,
   } = parsed.data;
-  const normalisedNumber = toNumber.replace(/[ \-()]/g, "");
+  const normalisedNumber = normalisePhone(toNumber);
 
   // Required env
   const missing: string[] = [];

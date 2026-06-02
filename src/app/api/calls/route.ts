@@ -20,6 +20,8 @@ export async function GET() {
       durationSec: c.durationSec,
       transcript: (() => { try { return c.transcript ? JSON.parse(c.transcript) : []; } catch { return []; } })(),
       recordingUrl: c.recordingUrl,
+      endedReason: c.endedReason ?? null,
+      invoiceNumber: c.invoiceNumber ?? null,
       createdAt: c.createdAt,
     })),
   });

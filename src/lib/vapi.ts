@@ -40,11 +40,19 @@ const MANNER_GUIDANCE: Record<Manner, string> = {
     "Be professional and precise. Use complete sentences. Avoid contractions and filler words.",
 };
 
+const fmtAmount = (currency: string | null | undefined, amount: number | string | null | undefined): string => {
+  if (amount == null || amount === "") return "not specified";
+  const c = (currency ?? "").trim().toUpperCase();
+  if (c === "" || c === "AUD") return `$${amount}`;
+  return `${c} ${amount}`;
+};
+
 function formatLineItems(lineItems: string, currency: string): string {
   try {
     const items = JSON.parse(lineItems);
     if (!Array.isArray(items)) return `Line items: ${lineItems}`;
-    const curr = currency ? `${currency} ` : "";
+    const c = (currency ?? "").trim().toUpperCase();
+    const curr = (c === "" || c === "AUD") ? "$" : `${c} `;
     const lines = items.map((item: {
       description?: string | null;
       quantity?: number | null;
@@ -146,7 +154,7 @@ Invoice number: ${invoiceNumber}
 Do not proactively state the invoice number to the contact. Refer to it as "the invoice" or "your invoice". Only read out the invoice number if the contact explicitly asks for it.
 Invoice date: ${invoiceDate ?? "not specified"}
 Due date: ${dueDate ?? "not specified"}
-Amount due: ${currency ?? ""} ${amountDue ?? "not specified"}
+Amount due: ${fmtAmount(currency, amountDue)}
 ${lineItems ? formatLineItems(lineItems, currency ?? "") : ""}
 ${invoiceNotes ? `Notes: ${invoiceNotes}` : ""}${(args.bankName || args.bsb || args.accountNumber || args.swiftCode || args.abn || args.remittanceName || args.remittanceContact) ? `\nPayment details:${args.bankName ? `\nBank: ${args.bankName}` : ""}${args.bsb ? ` | BSB: ${args.bsb}` : ""}${args.accountNumber ? ` | Account: ${args.accountNumber}` : ""}${args.swiftCode ? ` | SWIFT: ${args.swiftCode}` : ""}${args.abn ? ` | ABN: ${args.abn}` : ""}${args.remittanceName ? `\nRemit to: ${args.remittanceName}` : ""}${args.remittanceContact ? `, ${args.remittanceContact}` : ""}\nDo not proactively mention payment options, banking details, or offer to share payment information at any point — wait for the contact to raise it. Only if the contact explicitly asks how they can pay or what payment options are available should you respond with the method name(s) only — for example "We can accept payment by bank transfer" — no account numbers or other details yet. Only after the contact confirms they want the details or explicitly asks for them should you share the actual account information. When you do share the details, read them out in small groups of 2–3 pieces at a time, pausing after each group to let them write it down — state the bank name and BSB first, then pause; then the account number, then pause; then any remaining details such as SWIFT code or ABN. Never read all banking fields in one go. If the contact declines the details or says they will arrange payment another way, simply acknowledge and move on — do not re-offer or volunteer anything further.` : ""}`
       : ""
@@ -265,11 +273,20 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
         voicemailDetectionTypes: ["machine_end_beep", "machine_end_silence", "machine_end_other"],
         enabled: true,
       },
+      voicemailMessage: args.invoiceNumber
+        ? `Hi, this is a message for ${args.contactBusiness}. Envoy is calling on behalf of ${args.userName} regarding an outstanding invoice. We're following up on payment and would appreciate a call back at your earliest convenience. Thank you.`
+        : `Hi, this is Envoy calling on behalf of ${args.userName}. We tried to reach you but weren't able to connect. Please call back at your earliest convenience. Thank you.`,
       backgroundDenoisingEnabled: true,
       // Webhook target on the assistant (inline assistant config)
       server: {
         url: `${args.publicUrl}/api/calls/webhook`,
       },
+      // For invoice calls, ask Vapi's post-call AI to produce a factual, call-specific summary.
+      ...(args.invoiceNumber ? {
+        analysisPlan: {
+          summaryPrompt: `Summarize this call outcome in 2–3 sentences. Focus only on what was actually discussed and agreed — do not invent or assume. Include any concrete details that came up: dates, amounts, reference numbers, contact names, reasons given, follow-up steps. If the call went to voicemail or the contact wasn't available, state that clearly. Be factual and concise — no padding.`,
+        },
+      } : {}),
     },
   };
 

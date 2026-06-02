@@ -11,7 +11,7 @@ function deriveOutcome(endedReason?: string, successEval?: string): string {
   }
   if (!endedReason) return "success";
   const r = endedReason.toLowerCase();
-  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy")) return "no-answer";
+  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy") || r.includes("machine")) return "no-answer";
   if (r.includes("error") || r.includes("failed")) return "failed";
   return "success";
 }
@@ -139,6 +139,7 @@ export async function GET(
     transcript: (() => { try { return call.transcript ? JSON.parse(call.transcript) : []; } catch { return []; } })(),
     recordingUrl: call.recordingUrl,
     endedReason: call.endedReason,
+    invoiceNumber: call.invoiceNumber ?? null,
     createdAt: call.createdAt,
     pollError,
   }, { headers: { "Cache-Control": "no-store" } });

@@ -50,7 +50,7 @@ function deriveOutcome(endedReason?: string, successEval?: string): string {
   }
   if (!endedReason) return "success";
   const r = endedReason.toLowerCase();
-  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy")) return "no-answer";
+  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy") || r.includes("machine")) return "no-answer";
   if (r.includes("error") || r.includes("failed")) return "failed";
   return "success";
 }
@@ -125,11 +125,9 @@ export async function POST(req: NextRequest) {
 
   switch (msg.type) {
     case "status-update": {
-      const rawStatus = msg.status ?? msg.call?.status ?? "in-progress";
-      // "ended" is Vapi's transitional state just before end-of-call-report fires.
-      // Skip writing it — keep DB at "in-progress" so the Live screen stays active
-      // until end-of-call-report sets status to "completed" with transcript/summary.
-      if (rawStatus === "ended") break;
+      const rawStatus = msg.status ?? msg.call?.status;
+      // Skip if no status field, or if "ended" (transitional state before end-of-call-report).
+      if (!rawStatus || rawStatus === "ended") break;
       // Only advance — never regress to an earlier state (e.g. "queued" after "ringing").
       const currentRank = STATUS_RANK[call.status] ?? -1;
       const newRank = STATUS_RANK[rawStatus] ?? -1;
@@ -148,10 +146,20 @@ export async function POST(req: NextRequest) {
 
     case "end-of-call-report": {
       const transcript = formatTranscript(msg.artifact?.messages ?? msg.messages);
-      const summary = msg.analysis?.summary ?? msg.summary ?? null;
+      const endedReason = msg.endedReason ?? null;
+      const isVoicemail = endedReason
+        ? /voicemail|machine/i.test(endedReason)
+        : false;
+
+      // For voicemail calls Vapi often sends no summary — synthesise a clear one.
+      const rawSummary = msg.analysis?.summary ?? msg.summary ?? null;
+      const summary = rawSummary ??
+        (isVoicemail
+          ? `Envoy called ${call.contactBusiness} but the call went to voicemail. A message was left.`
+          : null);
+
       const recordingUrl = msg.artifact?.recordingUrl ?? msg.recordingUrl ?? null;
       const durationSec = msg.durationSeconds ?? null;
-      const endedReason = msg.endedReason ?? null;
       const outcome = deriveOutcome(
         endedReason ?? undefined,
         msg.analysis?.successEvaluation
