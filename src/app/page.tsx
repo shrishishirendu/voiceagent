@@ -288,8 +288,7 @@ function Home({
   onRefresh: () => void;
 }) {
   const resolved = calls.filter((c) => c.outcome === "success").length;
-  const partial = calls.filter((c) => c.outcome === "partial").length;
-  const totalSec = calls.reduce((s, c) => s + (c.durationSec ?? 0), 0);
+  const failed = calls.filter((c) => c.outcome === "failed").length;
 
   return (
     <div className="min-h-screen pb-32 fade-in">
@@ -308,9 +307,6 @@ function Home({
           </button>
         </div>
 
-        <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>
-          {loading ? "Loading…" : calls.length === 0 ? "No calls yet" : `${calls.length} ${calls.length === 1 ? "call" : "calls"}`}
-        </p>
         <h1 className="font-display text-[2.6rem] leading-[1.05] font-light tracking-tight">
           {calls.length === 0 ? (
             <>Place your<br/><span className="italic font-normal" style={{ color: "var(--burgundy)" }}>first call.</span></>
@@ -322,20 +318,14 @@ function Home({
 
       <Hairline />
 
-      <div className="grid grid-cols-3 px-6 py-5" style={{ borderBottom: "1px solid var(--hairline)" }}>
+      <div className="grid grid-cols-2 px-6 py-3" style={{ borderBottom: "1px solid var(--hairline)" }}>
         <div>
-          <div className="font-display text-[1.75rem] leading-none font-medium">{fmtDuration(totalSec)}</div>
-          <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>Total time</div>
+          <div className="font-display text-[1.75rem] leading-none font-medium">{resolved}</div>
+          <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>Resolved</div>
         </div>
-        <div className="border-l border-r" style={{ borderColor: "var(--hairline)" }}>
-          <div className="pl-4">
-            <div className="font-display text-[1.75rem] leading-none font-medium">{resolved}</div>
-            <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>Resolved</div>
-          </div>
-        </div>
-        <div className="pl-4">
-          <div className="font-display text-[1.75rem] leading-none font-medium">{partial}</div>
-          <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>Partial</div>
+        <div className="border-l pl-4" style={{ borderColor: "var(--hairline)" }}>
+          <div className="font-display text-[1.75rem] leading-none font-medium">{failed}</div>
+          <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>Failed</div>
         </div>
       </div>
 
