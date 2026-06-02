@@ -42,6 +42,11 @@ const STATUS_RANK: Record<string, number> = {
 };
 
 function deriveOutcome(endedReason?: string, successEval?: string): string {
+  // Check endedReason first: a voicemail call can still report a truthy successEvaluation
+  // (Envoy "succeeded" at leaving a message), so classify connectivity outcomes before
+  // trusting the success evaluation.
+  const r = (endedReason ?? "").toLowerCase();
+  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy") || r.includes("machine")) return "no-answer";
   if (successEval) {
     const s = successEval.toLowerCase();
     if (s.includes("success") || s === "true" || s === "pass") return "success";
@@ -49,8 +54,6 @@ function deriveOutcome(endedReason?: string, successEval?: string): string {
     if (s.includes("fail") || s === "false") return "failed";
   }
   if (!endedReason) return "success";
-  const r = endedReason.toLowerCase();
-  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy") || r.includes("machine")) return "no-answer";
   if (r.includes("error") || r.includes("failed")) return "failed";
   return "success";
 }

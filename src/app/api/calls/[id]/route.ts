@@ -3,6 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { probeVapiCall } from "@/lib/vapi";
 
 function deriveOutcome(endedReason?: string, successEval?: string): string {
+  // Check endedReason first: a voicemail call can still report a truthy successEvaluation
+  // (Envoy "succeeded" at leaving a message), so classify connectivity outcomes before
+  // trusting the success evaluation.
+  const r = (endedReason ?? "").toLowerCase();
+  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy") || r.includes("machine")) return "no-answer";
   if (successEval) {
     const s = successEval.toLowerCase();
     if (s.includes("success") || s === "true" || s === "pass") return "success";
@@ -10,8 +15,6 @@ function deriveOutcome(endedReason?: string, successEval?: string): string {
     if (s.includes("fail") || s === "false") return "failed";
   }
   if (!endedReason) return "success";
-  const r = endedReason.toLowerCase();
-  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy") || r.includes("machine")) return "no-answer";
   if (r.includes("error") || r.includes("failed")) return "failed";
   return "success";
 }
@@ -74,7 +77,16 @@ export async function GET(
         const transcript = formatMessages(vapiData.artifact?.messages ?? vapiData.messages);
         const summary = vapiData.analysis?.summary ?? (vapiData.summary as string | undefined) ?? null;
         const endedReason = (vapiData.endedReason as string | undefined) ?? null;
-        const outcome = deriveOutcome(endedReason ?? undefined, vapiData.analysis?.successEvaluation);
+        const rawMessages = vapiData.artifact?.messages ?? vapiData.messages ?? [];
+        const VOICEMAIL_RE = /audio message|leave a message|leave your message|not available|unavailable|voicemail|answering machine|at the tone|after the beep|record your message|send a message/i;
+        const transcriptHasVoicemail = rawMessages.some(
+          (m: { role: string; message?: string; content?: string }) =>
+            m.role === "user" && VOICEMAIL_RE.test(m.message ?? m.content ?? "")
+        );
+        const isVoicemailDetected = !!(endedReason && /voicemail|machine/i.test(endedReason)) || transcriptHasVoicemail;
+        const outcome = isVoicemailDetected
+          ? "no-answer"
+          : deriveOutcome(endedReason ?? undefined, vapiData.analysis?.successEvaluation);
         const result = summary
           ? summary.split(/[.\n]/).find((s: string) => s.trim().length > 10)?.trim() ?? null
           : null;

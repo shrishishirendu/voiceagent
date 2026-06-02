@@ -137,7 +137,7 @@ const fmtAmount = (currency: string | null | undefined, amount: number | null | 
   // Thousands separators; show up to 2 decimals but don't force trailing zeros (200 → "200", 577271.99 → "577,271.99").
   const n = amount.toLocaleString("en-AU", { maximumFractionDigits: 2 });
   const c = (currency ?? "").trim().toUpperCase();
-  if (c === "" || c === "AUD") return `$${n}`;
+  if (c === "" || c === "AUD" || c === "$" || c === "A$" || c === "AU$") return `$${n}`;
   return `${c} ${n}`;
 };
 
