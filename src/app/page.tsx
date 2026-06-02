@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { companyNamesMatch } from "@/lib/nameUtils";
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -43,6 +44,8 @@ interface Call {
   durationSec: number | null;
   transcript: TranscriptLine[];
   recordingUrl: string | null;
+  endedReason: string | null;
+  invoiceNumber: string | null;
   createdAt: string;
 }
 
@@ -68,13 +71,35 @@ interface InvoiceParseResult {
 }
 
 type BulkStatus = "parsing" | "parsed" | "parse-error" | "dispatching" | "dispatched" | "dispatch-error";
+type BulkSource = "upload" | "drive";
+
+interface DriveInvoiceFile {
+  fileId: string;
+  name: string;
+  size: number | null;
+  modifiedTime: string;
+}
+
+interface ContactRow {
+  businessName: string;
+  abn: string | null;
+  phone: string | null;
+  email: string | null;
+  contactPerson: string | null;
+}
 
 interface BulkItem {
   uid: string;
-  file: File;
+  source: BulkSource;
+  file?: File;            // upload items only
+  driveFileId?: string;   // drive items only
+  fileName: string;       // unified display name
+  fileSize?: number | null;
+  modifiedTime?: string;
   status: BulkStatus;
   error?: string;
   parsed?: InvoiceParseResult;
+  phoneSource?: "spreadsheet" | "pdf" | "none";
   callId?: string;
   callStatus?: Status;
   callOutcome?: Outcome;
@@ -90,6 +115,13 @@ const fmtDuration = (s: number | null | undefined) => {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 };
 
+const fmtBytes = (n: number | null | undefined) => {
+  if (n == null) return "";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 const fmtWhen = (iso: string) => {
   const d = new Date(iso);
   const now = new Date();
@@ -98,6 +130,36 @@ const fmtWhen = (iso: string) => {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+};
+
+const fmtAmount = (currency: string | null | undefined, amount: number | null | undefined): string => {
+  if (amount == null) return "";
+  // Thousands separators; show up to 2 decimals but don't force trailing zeros (200 → "200", 577271.99 → "577,271.99").
+  const n = amount.toLocaleString("en-AU", { maximumFractionDigits: 2 });
+  const c = (currency ?? "").trim().toUpperCase();
+  if (c === "" || c === "AUD") return `$${n}`;
+  return `${c} ${n}`;
+};
+
+const fmtDate = (dateStr: string | null | undefined): string => {
+  if (!dateStr) return "";
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const s = dateStr.trim();
+  // YYYY-MM-DD
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (iso) {
+    const mi = parseInt(iso[2], 10) - 1;
+    if (mi < 0 || mi > 11) return s;
+    return `${parseInt(iso[3], 10)} ${months[mi]} ${iso[1]}`;
+  }
+  // D/M/YYYY or DD/MM/YYYY (AU format used by Gemini for non-ISO dates)
+  const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (dmy) {
+    const mi = parseInt(dmy[2], 10) - 1;
+    if (mi < 0 || mi > 11) return s;
+    return `${parseInt(dmy[1], 10)} ${months[mi]} ${dmy[3]}`;
+  }
+  return s;
 };
 
 const outcomeStyle = (o: Outcome) => {
@@ -122,10 +184,9 @@ const generateInvoiceObjective = (parsed: InvoiceParseResult): string => {
   const parts: string[] = ["Follow up on payment for invoice"];
   if (parsed.invoiceNumber) parts.push(parsed.invoiceNumber);
   if (parsed.amountDue != null) {
-    const amtStr = parsed.currency ? `${parsed.currency} ${parsed.amountDue}` : String(parsed.amountDue);
-    parts.push(`(${amtStr} outstanding)`);
+    parts.push(`(${fmtAmount(parsed.currency, parsed.amountDue)} outstanding)`);
   }
-  if (parsed.dueDate) parts.push(`— due ${parsed.dueDate}`);
+  if (parsed.dueDate) parts.push(`— due ${fmtDate(parsed.dueDate)}`);
   parts.push(". Confirm whether payment has been made or is scheduled. If overdue, politely arrange a settlement date or payment plan.");
   return parts.join(" ");
 };
@@ -347,11 +408,10 @@ function Home({
             }}
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-              <path d="M12 16V4" />
-              <path d="M7 9l5-5 5 5" />
-              <path d="M20 16.5v2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-2" />
+              <path d="M9 11l3 3L22 4" />
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
             </svg>
-            Upload invoice
+            Select invoice
           </button>
         </div>
       </div>
@@ -651,10 +711,9 @@ function InvoiceCompose({
     const objParts: string[] = ["Follow up on payment for invoice"];
     if (nextInvoiceNumber) objParts.push(nextInvoiceNumber);
     if (parsed.amountDue != null) {
-      const amtStr = parsed.currency ? `${parsed.currency} ${parsed.amountDue}` : String(parsed.amountDue);
-      objParts.push(`(${amtStr} outstanding)`);
+      objParts.push(`(${fmtAmount(parsed.currency, parsed.amountDue)} outstanding)`);
     }
-    if (parsed.dueDate) objParts.push(`— due ${parsed.dueDate}`);
+    if (parsed.dueDate) objParts.push(`— due ${fmtDate(parsed.dueDate)}`);
     objParts.push(". Confirm whether payment has been made or is scheduled. If overdue, politely arrange a settlement date or payment plan.");
     setObjective(objParts.join(" "));
     setStage("review");
@@ -1255,6 +1314,12 @@ function Live({
 
   const status: Status = call?.status ?? "dispatching";
   const finished = status === "completed" || status === "failed" || pollTimedOut;
+  // Stay on "Ringing" until actual speech is present, even if backend advanced to "in-progress".
+  // Vapi fires in-progress when its audio stream connects (voicemail detection), not when a human answers.
+  const displayStatus: Status =
+    status === "in-progress" && (!call?.transcript || call.transcript.length === 0)
+      ? "ringing"
+      : status;
 
   return (
     <div
@@ -1277,7 +1342,7 @@ function Live({
                 background: finished ? "var(--success)" : "var(--burgundy-light)",
               }}
             />
-            <span className="smallcaps" style={{ opacity: 0.8 }}>{statusLabel(status)}</span>
+            <span className="smallcaps" style={{ opacity: 0.8 }}>{statusLabel(displayStatus)}</span>
           </div>
         </div>
 
@@ -1304,14 +1369,14 @@ function Live({
         <div className="flex flex-col items-center justify-center py-6">
           <div className="relative mb-4">
             <div
-              className={status === "dispatching" || status === "ringing" ? "pulse-ring" : ""}
+              className={displayStatus === "dispatching" || displayStatus === "ringing" ? "pulse-ring" : ""}
               style={{
                 width: 78, height: 78, borderRadius: 999,
                 background: "var(--burgundy)",
                 display: "flex", alignItems: "center", justifyContent: "center",
               }}
             >
-              <WaveAnim active={status === "in-progress"} />
+              <WaveAnim active={displayStatus === "in-progress"} />
             </div>
           </div>
           <div className="font-mono text-[1.3rem] tracking-wider" style={{ opacity: 0.9 }}>
@@ -1375,6 +1440,16 @@ function Live({
 
 function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
   const oc = outcomeStyle(call.outcome);
+  const isVoicemail = !!(
+    call.endedReason && /voicemail|machine/i.test(call.endedReason)
+  );
+  const isInvoice = !!call.invoiceNumber;
+
+  // For voicemail calls, only show Envoy's spoken lines (the message left).
+  const voicemailLines = isVoicemail
+    ? (call.transcript ?? []).filter((l) => l.who === "envoy")
+    : [];
+
   return (
     <div className="min-h-screen pb-16 fade-in">
       <header className="px-6 pt-12 pb-6">
@@ -1398,16 +1473,31 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
 
       <Hairline />
 
-      {call.result && (
-        <>
-          <section className="px-6 py-7">
-            <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Outcome</p>
-            <p className="font-display text-[1.4rem] leading-snug font-medium tracking-tight" style={{ color: "var(--burgundy)" }}>
-              {call.result}
-            </p>
-          </section>
-          <Hairline />
-        </>
+      {/* Outcome — for invoice calls show the full AI summary; for others show the brief result line */}
+      {isInvoice ? (
+        call.summary && (
+          <>
+            <section className="px-6 py-7">
+              <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Outcome</p>
+              <p className="text-[1rem] leading-relaxed" style={{ color: "var(--ink)" }}>
+                {call.summary}
+              </p>
+            </section>
+            <Hairline />
+          </>
+        )
+      ) : (
+        call.result && (
+          <>
+            <section className="px-6 py-7">
+              <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Outcome</p>
+              <p className="font-display text-[1.4rem] leading-snug font-medium tracking-tight" style={{ color: "var(--burgundy)" }}>
+                {call.result}
+              </p>
+            </section>
+            <Hairline />
+          </>
+        )
       )}
 
       <section className="px-6 py-6">
@@ -1415,7 +1505,9 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
         <p className="text-[1rem] leading-relaxed">{call.objective}</p>
       </section>
 
-      {call.summary && (
+      {/* Envoy's report — for voicemail calls this carries the "went to voicemail" note;
+          for invoice calls the summary is already shown above so skip it here */}
+      {call.summary && !isInvoice && (
         <>
           <Hairline />
           <section className="px-6 py-6">
@@ -1427,23 +1519,42 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
         </>
       )}
 
-      {call.transcript && call.transcript.length > 0 && (
-        <>
-          <Hairline />
-          <section className="px-6 py-6">
-            <p className="smallcaps mb-4" style={{ color: "var(--muted)" }}>Transcript</p>
-            <div className="space-y-4">
-              {call.transcript.map((line, i) => (
-                <div key={i}>
-                  <p className="smallcaps mb-1" style={{ color: line.who === "envoy" ? "var(--burgundy)" : "var(--muted)" }}>
-                    {line.who === "envoy" ? "Envoy" : call.contactBusiness.split(" ")[0]}
-                  </p>
-                  <p className="text-[0.95rem] leading-relaxed">{line.text}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-        </>
+      {isVoicemail ? (
+        voicemailLines.length > 0 && (
+          <>
+            <Hairline />
+            <section className="px-6 py-6">
+              <p className="smallcaps mb-4" style={{ color: "var(--muted)" }}>Voicemail message</p>
+              <div className="space-y-4">
+                {voicemailLines.map((line, i) => (
+                  <div key={i}>
+                    <p className="smallcaps mb-1" style={{ color: "var(--burgundy)" }}>Envoy</p>
+                    <p className="text-[0.95rem] leading-relaxed">{line.text}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </>
+        )
+      ) : (
+        call.transcript && call.transcript.length > 0 && (
+          <>
+            <Hairline />
+            <section className="px-6 py-6">
+              <p className="smallcaps mb-4" style={{ color: "var(--muted)" }}>Transcript</p>
+              <div className="space-y-4">
+                {call.transcript.map((line, i) => (
+                  <div key={i}>
+                    <p className="smallcaps mb-1" style={{ color: line.who === "envoy" ? "var(--burgundy)" : "var(--muted)" }}>
+                      {line.who === "envoy" ? "Envoy" : call.contactBusiness.split(" ")[0]}
+                    </p>
+                    <p className="text-[0.95rem] leading-relaxed">{line.text}</p>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </>
+        )
       )}
 
       {call.recordingUrl && (
@@ -1483,7 +1594,7 @@ function BulkItemRow({
   onRemove: () => void;
   onViewDetail?: () => void;
 }) {
-  const { status, file, parsed, error, callStatus, callOutcome, callPollError } = item;
+  const { status, fileName, parsed, error, callStatus, callOutcome, callPollError } = item;
   const canDispatch = (status === "parsed" || status === "dispatch-error") &&
     hasCallableNumber(parsed?.toNumber);
   const isSettled = status === "dispatched" && (callStatus === "completed" || callStatus === "failed");
@@ -1512,11 +1623,11 @@ function BulkItemRow({
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-[0.92rem] font-medium truncate" style={{ color: "var(--ink)" }}>
-            {file.name}
+            {fileName}
           </p>
           {(status === "parsed" || status === "dispatching" || status === "dispatched" || status === "dispatch-error") && parsed && (
             <p className="text-[0.78rem] mt-0.5 truncate" style={{ color: "var(--muted)" }}>
-              {[parsed.vendorName, parsed.amountDue != null ? `${parsed.currency ?? ""} ${parsed.amountDue}`.trim() : null, parsed.dueDate ? `due ${parsed.dueDate}` : null]
+              {[parsed.vendorName, fmtAmount(parsed.currency, parsed.amountDue) || null, parsed.dueDate ? `due ${fmtDate(parsed.dueDate)}` : null]
                 .filter(Boolean)
                 .join(" · ")}
             </p>
@@ -1731,17 +1842,380 @@ function BulkInvoiceScreen({
   );
 }
 
+// ─── Select Invoice ──────────────────────────────────────────────────────
+
+function SelectInvoiceScreen({
+  driveFiles,
+  driveLoading,
+  driveError,
+  queue,
+  dispatching,
+  onToggleDrive,
+  onSelectAllDrive,
+  onDeselectAllDrive,
+  onDispatch,
+  onBack,
+}: {
+  driveFiles: DriveInvoiceFile[];
+  driveLoading: boolean;
+  driveError: string | null;
+  queue: BulkItem[];
+  dispatching: boolean;
+  onToggleDrive: (f: DriveInvoiceFile) => void;
+  onSelectAllDrive: () => void;
+  onDeselectAllDrive: () => void;
+  onDispatch: (selectedUploadFiles: File[]) => void;
+  onBack: () => void;
+}) {
+  const [tab, setTab] = useState<"drive" | "upload">("drive");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadedFiles, setUploadedFiles] = useState<{ uid: string; file: File; selected: boolean }[]>([]);
+
+  const selectedDriveIds = new Set(queue.filter((i) => i.driveFileId).map((i) => i.driveFileId!));
+  const selectedUploadCount = uploadedFiles.filter((f) => f.selected).length;
+  const totalDispatchCount = queue.length + selectedUploadCount;
+  const hasDispatchable = totalDispatchCount > 0;
+
+  return (
+    <div className="min-h-screen pb-36 fade-in">
+      <header className="px-6 pt-12 pb-6 flex items-center justify-between">
+        <button onClick={onBack} className="-ml-2 px-2 py-1.5 flex items-center gap-1 text-[0.92rem]" style={{ color: "var(--muted)" }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <path d="M19 12H5M12 19l-7-7 7-7" />
+          </svg>
+          Back
+        </button>
+        <Brand />
+      </header>
+
+      <div className="px-6 mb-6">
+        <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Invoice dispatch</p>
+        <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight">
+          Select invoices,<br />
+          <span className="italic" style={{ color: "var(--burgundy)" }}>dispatch Envoy.</span>
+        </h1>
+      </div>
+
+      {/* Tab toggle */}
+      <div className="px-6 mb-4">
+        <div className="flex rounded-full border overflow-hidden" style={{ borderColor: "var(--hairline-strong)", background: "var(--cream-light)" }}>
+          {(["drive", "upload"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className="flex-1 py-2.5 text-[0.85rem] font-medium transition"
+              style={{
+                background: tab === t ? "var(--ink)" : "transparent",
+                color: tab === t ? "var(--cream)" : "var(--muted)",
+                borderRadius: "inherit",
+              }}
+            >
+              {t === "drive" ? "Google Drive" : "Upload files"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Drive tab */}
+      {tab === "drive" && (
+        <div className="px-6">
+          {driveLoading && (
+            <p className="text-[0.88rem] py-6 text-center" style={{ color: "var(--muted)" }}>Loading Drive…</p>
+          )}
+          {driveError && !driveLoading && (
+            <p className="text-[0.82rem] py-4" style={{ color: "var(--burgundy)" }}>{driveError}</p>
+          )}
+          {!driveLoading && !driveError && driveFiles.length === 0 && (
+            <p className="text-[0.88rem] py-6 text-center" style={{ color: "var(--muted)" }}>No PDF invoices found in Drive.</p>
+          )}
+          {!driveLoading && !driveError && driveFiles.length > 0 && (
+            <div className="flex justify-end mb-2">
+              <button
+                onClick={selectedDriveIds.size > 0 ? onDeselectAllDrive : onSelectAllDrive}
+                className="text-[0.8rem] font-medium"
+                style={{ color: "var(--burgundy)" }}
+              >
+                {selectedDriveIds.size > 0 ? "Deselect all" : "Select all"}
+              </button>
+            </div>
+          )}
+          <div className="flex flex-col gap-2">
+            {driveFiles.map((f) => {
+              const selected = selectedDriveIds.has(f.fileId);
+              return (
+                <button
+                  key={f.fileId}
+                  onClick={() => onToggleDrive(f)}
+                  className="w-full text-left px-4 py-3.5 rounded-md border flex items-center gap-3 transition"
+                  style={{
+                    background: selected ? "var(--burgundy-tint)" : "var(--cream-light)",
+                    borderColor: selected ? "var(--burgundy)" : "var(--hairline)",
+                  }}
+                >
+                  <div
+                    className="w-5 h-5 rounded border flex items-center justify-center shrink-0"
+                    style={{ borderColor: selected ? "var(--burgundy)" : "var(--hairline-strong)", background: selected ? "var(--burgundy)" : "transparent" }}
+                  >
+                    {selected && (
+                      <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="var(--cream)" strokeWidth="2">
+                        <path d="M2 6l3 3 5-5" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[0.9rem] font-medium truncate" style={{ color: "var(--ink)" }}>{f.name}</p>
+                    <p className="text-[0.75rem] mt-0.5" style={{ color: "var(--muted)" }}>
+                      {[fmtBytes(f.size), fmtWhen(f.modifiedTime)].filter(Boolean).join(" · ")}
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Upload tab */}
+      {tab === "upload" && (
+        <div className="px-6">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/pdf"
+            multiple
+            className="hidden"
+            onChange={(e) => {
+              if (!e.target.files) return;
+              const incoming = Array.from(e.target.files);
+              setUploadedFiles((prev) => {
+                const seen = new Set(prev.map((f) => `${f.file.name}::${f.file.size}`));
+                const fresh = incoming
+                  .filter((f) => !seen.has(`${f.name}::${f.size}`))
+                  .map((f) => ({ uid: crypto.randomUUID(), file: f, selected: true }));
+                return [...prev, ...fresh];
+              });
+              e.target.value = "";
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full py-10 rounded-md border-2 border-dashed flex flex-col items-center gap-2 transition"
+            style={{ borderColor: "var(--hairline-strong)", color: "var(--muted)" }}
+          >
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M12 16V4" /><path d="M7 9l5-5 5 5" />
+              <path d="M20 16.5v2a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-2" />
+            </svg>
+            <span className="text-[0.88rem]">Choose PDF invoices</span>
+          </button>
+
+          {uploadedFiles.length > 0 && (
+            <div className="mt-4">
+              <div className="flex justify-end mb-2">
+                <button
+                  onClick={() => {
+                    const anySelected = uploadedFiles.some((f) => f.selected);
+                    setUploadedFiles((prev) => prev.map((f) => ({ ...f, selected: !anySelected })));
+                  }}
+                  className="text-[0.8rem] font-medium"
+                  style={{ color: "var(--burgundy)" }}
+                >
+                  {uploadedFiles.some((f) => f.selected) ? "Deselect all" : "Select all"}
+                </button>
+              </div>
+              <div className="flex flex-col gap-2">
+                {uploadedFiles.map((f) => (
+                  <button
+                    key={f.uid}
+                    onClick={() => setUploadedFiles((prev) => prev.map((u) => u.uid === f.uid ? { ...u, selected: !u.selected } : u))}
+                    className="w-full text-left px-4 py-3.5 rounded-md border flex items-center gap-3 transition"
+                    style={{
+                      background: f.selected ? "var(--burgundy-tint)" : "var(--cream-light)",
+                      borderColor: f.selected ? "var(--burgundy)" : "var(--hairline)",
+                    }}
+                  >
+                    <div
+                      className="w-5 h-5 rounded border flex items-center justify-center shrink-0"
+                      style={{ borderColor: f.selected ? "var(--burgundy)" : "var(--hairline-strong)", background: f.selected ? "var(--burgundy)" : "transparent" }}
+                    >
+                      {f.selected && (
+                        <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="var(--cream)" strokeWidth="2">
+                          <path d="M2 6l3 3 5-5" />
+                        </svg>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[0.9rem] font-medium truncate" style={{ color: "var(--ink)" }}>{f.file.name}</p>
+                      <p className="text-[0.75rem] mt-0.5" style={{ color: "var(--muted)" }}>{fmtBytes(f.file.size)}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Dispatch CTA */}
+      <div
+        className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-7 pt-14"
+        style={{ background: "linear-gradient(to top, var(--cream) 60%, transparent)" }}
+      >
+        <button
+          onClick={() => onDispatch(uploadedFiles.filter((f) => f.selected).map((f) => f.file))}
+          disabled={!hasDispatchable || dispatching}
+          className="w-full py-4 rounded-full font-medium text-[1rem] transition active:scale-[0.98]"
+          style={{
+            background: hasDispatchable && !dispatching ? "var(--burgundy)" : "var(--hairline-strong)",
+            color: "var(--cream)",
+            opacity: hasDispatchable && !dispatching ? 1 : 0.6,
+            cursor: hasDispatchable && !dispatching ? "pointer" : "not-allowed",
+            letterSpacing: "-0.01em",
+          }}
+        >
+          {dispatching ? "Dispatching…" : `Dispatch Envoy${totalDispatchCount > 0 ? ` (${totalDispatchCount})` : ""}`}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Bulk Summary ─────────────────────────────────────────────────────────
+
+const isFailedItem = (i: BulkItem) =>
+  i.status === "dispatch-error" || i.status === "parse-error" || i.callStatus === "failed";
+const isInProgressItem = (i: BulkItem) =>
+  i.status === "parsing" || i.status === "dispatching" ||
+  i.callStatus === "queued" || i.callStatus === "ringing" || i.callStatus === "in-progress";
+
+function BulkSummaryScreen({
+  items,
+  onViewDetail,
+  onBack,
+  onRetryFailed,
+}: {
+  items: BulkItem[];
+  onViewDetail: (callId: string) => void;
+  onBack: () => void;
+  onRetryFailed: () => void;
+}) {
+  const anyInProgress = items.some(isInProgressItem);
+  const failedCount = items.filter(isFailedItem).length;
+  const showRetry = !anyInProgress && failedCount > 0;
+
+  const getSummaryBadge = (item: BulkItem) => {
+    // Terminal: show outcome
+    if (item.callStatus === "completed" || item.callStatus === "failed") {
+      const oc = outcomeStyle(item.callOutcome ?? null);
+      return { label: oc.label, bg: oc.bg, fg: oc.fg, pulsing: false };
+    }
+    // Active call states
+    if (item.callStatus === "in-progress") return { label: "In conversation", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
+    if (item.callStatus === "ringing") return { label: "Ringing", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
+    if (item.callStatus === "queued") return { label: "Connecting", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
+    // Dispatch states
+    if (item.status === "dispatched") return { label: "Dispatched", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
+    if (item.status === "dispatching") return { label: "Dispatching…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
+    if (item.status === "dispatch-error") return { label: "Failed", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: false };
+    if (item.status === "parse-error") return { label: "Parse error", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
+    if (item.status === "parsed") return { label: "Ready", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
+    // Default: parsing
+    return { label: "Parsing…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
+  };
+
+  return (
+    <div className="min-h-screen pb-32 fade-in">
+      <header className="px-6 pt-12 pb-6 flex items-center justify-between">
+        <button onClick={onBack} className="-ml-2 px-2 py-1.5 flex items-center gap-1 text-[0.92rem]" style={{ color: "var(--muted)" }}>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <path d="M19 12H5M12 19l-7-7 7-7" />
+          </svg>
+          Back
+        </button>
+        <Brand />
+      </header>
+
+      <div className="px-6 mb-6">
+        <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Dispatch summary</p>
+        <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight">
+          {items.length} invoice{items.length !== 1 ? "s" : ""},<br />
+          <span className="italic" style={{ color: "var(--burgundy)" }}>in progress.</span>
+        </h1>
+      </div>
+
+      <div className="px-6 flex flex-col gap-3">
+        {items.map((item) => {
+          const badge = getSummaryBadge(item);
+          const isSettled = item.callStatus === "completed" || item.callStatus === "failed";
+          const title = item.parsed?.contactBusiness || item.fileName;
+          const subtitle = [
+            fmtAmount(item.parsed?.currency, item.parsed?.amountDue) || null,
+            item.parsed?.dueDate ? `due ${fmtDate(item.parsed.dueDate)}` : null,
+          ].filter(Boolean).join(" · ");
+
+          return (
+            <button
+              key={item.uid}
+              onClick={isSettled && item.callId ? () => onViewDetail(item.callId!) : undefined}
+              className="w-full text-left px-4 py-4 rounded-md border flex items-center gap-3 transition"
+              style={{
+                background: "var(--cream-light)",
+                borderColor: isSettled ? "var(--hairline-strong)" : "var(--hairline)",
+                cursor: isSettled && item.callId ? "pointer" : "default",
+              }}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="text-[0.92rem] font-medium truncate" style={{ color: "var(--ink)" }}>{title}</p>
+                {subtitle && (
+                  <p className="text-[0.77rem] mt-0.5 truncate" style={{ color: "var(--muted)" }}>{subtitle}</p>
+                )}
+                {item.error && (
+                  <p className="text-[0.75rem] mt-0.5" style={{ color: "var(--burgundy)" }}>{item.error}</p>
+                )}
+                {isSettled && item.callId && (
+                  <p className="text-[0.72rem] mt-1.5" style={{ color: "var(--muted-light)" }}>Tap to view transcript →</p>
+                )}
+              </div>
+              <span
+                className={`text-[0.78rem] font-medium px-2.5 py-1 rounded-full shrink-0 ${badge.pulsing ? "dot-pulse" : ""}`}
+                style={{ background: badge.bg, color: badge.fg }}
+              >
+                {badge.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {showRetry && (
+        <div className="px-6 mt-6 mb-8">
+          <button
+            onClick={onRetryFailed}
+            className="w-full py-3.5 rounded-full font-medium text-[0.95rem] transition active:scale-[0.98]"
+            style={{ background: "var(--burgundy)", color: "var(--cream)" }}
+          >
+            Retry failed ({failedCount})
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── App ────────────────────────────────────────────────────────────────
 
 export default function EnvoyApp() {
-  const [screen, setScreen] = useState<"home" | "compose" | "invoice-compose" | "bulk-invoice" | "live" | "detail">("home");
+  const [screen, setScreen] = useState<"home" | "compose" | "invoice-compose" | "bulk-invoice" | "select-invoice" | "bulk-summary" | "live" | "detail">("home");
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeCallId, setActiveCallId] = useState<string | null>(null);
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
   const [reviewBulkUid, setReviewBulkUid] = useState<string | null>(null);
   const [returnToBulk, setReturnToBulk] = useState(false);
+  const [returnToSummary, setReturnToSummary] = useState(false);
   const [isDispatching, setIsDispatching] = useState(false);
+  const [driveFiles, setDriveFiles] = useState<DriveInvoiceFile[]>([]);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveError, setDriveError] = useState<string | null>(null);
   const bulkItemsRef = useRef<BulkItem[]>([]);
   useEffect(() => { bulkItemsRef.current = bulkItems; }, [bulkItems]);
 
@@ -1756,6 +2230,69 @@ export default function EnvoyApp() {
       setLoading(false);
     }
   }, []);
+
+  const loadDriveFiles = useCallback(async () => {
+    setDriveLoading(true);
+    setDriveError(null);
+    try {
+      const r = await fetch("/api/drive/invoices", { cache: "no-store" });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+      setDriveFiles(data.files ?? []);
+    } catch (e) {
+      setDriveError(e instanceof Error ? e.message : "Failed to load Drive files");
+    } finally {
+      setDriveLoading(false);
+    }
+  }, []);
+
+  const getBulkItemFile = async (item: BulkItem): Promise<File> => {
+    if (item.file) return item.file;
+    const r = await fetch(`/api/drive/invoice-file?fileId=${item.driveFileId}`);
+    if (!r.ok) throw new Error(`Failed to download ${item.fileName} (HTTP ${r.status})`);
+    const blob = await r.blob();
+    return new File([blob], item.fileName, { type: "application/pdf" });
+  };
+
+  const toggleDriveItem = (driveFile: DriveInvoiceFile) => {
+    setBulkItems((prev) => {
+      const existing = prev.find((i) => i.driveFileId === driveFile.fileId);
+      if (existing) return prev.filter((i) => i.driveFileId !== driveFile.fileId);
+      return [...prev, {
+        uid: crypto.randomUUID(),
+        source: "drive" as BulkSource,
+        driveFileId: driveFile.fileId,
+        fileName: driveFile.name,
+        fileSize: driveFile.size,
+        modifiedTime: driveFile.modifiedTime,
+        status: "parsing" as BulkStatus,
+      }];
+    });
+  };
+
+  const selectAllDrive = () => {
+    setBulkItems((prev) => {
+      const existing = new Set(prev.filter((i) => i.source === "drive").map((i) => i.driveFileId));
+      const additions: BulkItem[] = driveFiles
+        .filter((f) => !existing.has(f.fileId))
+        .map((f) => ({
+          uid: crypto.randomUUID(),
+          source: "drive" as BulkSource,
+          driveFileId: f.fileId,
+          fileName: f.name,
+          fileSize: f.size,
+          modifiedTime: f.modifiedTime,
+          status: "parsing" as BulkStatus,
+        }));
+      return [...prev, ...additions];
+    });
+  };
+
+  const deselectAllDrive = () => {
+    setBulkItems((prev) => prev.filter((i) => i.source !== "drive"));
+  };
+
+
 
   useEffect(() => { fetchCalls(); }, [fetchCalls]);
 
@@ -1838,15 +2375,15 @@ export default function EnvoyApp() {
   const handleBulkFiles = (files: File[]) => {
     setScreen("bulk-invoice");
     setBulkItems((prev) => {
-      const seen = new Set(prev.map((i) => `${i.file.name}::${i.file.size}`));
+      const seen = new Set(prev.map((i) => `${i.fileName}::${i.fileSize ?? ""}`));
       const newItems: BulkItem[] = [];
       for (const file of files) {
         const key = `${file.name}::${file.size}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        newItems.push({ uid: crypto.randomUUID(), file, status: "parsing" as BulkStatus });
+        newItems.push({ uid: crypto.randomUUID(), source: "upload", file, fileName: file.name, fileSize: file.size, status: "parsing" as BulkStatus });
       }
-      newItems.forEach((item) => parseBulkItem(item.uid, item.file));
+      newItems.forEach((item) => parseBulkItem(item.uid, item.file!));
       return [...prev, ...newItems];
     });
   };
@@ -1858,11 +2395,11 @@ export default function EnvoyApp() {
       const key = `${file.name}::${file.size}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      newItems.push({ uid: crypto.randomUUID(), file, status: "parsing" as BulkStatus });
+      newItems.push({ uid: crypto.randomUUID(), source: "upload", file, fileName: file.name, fileSize: file.size, status: "parsing" as BulkStatus });
     }
     setBulkItems(newItems);
     setScreen("bulk-invoice");
-    newItems.forEach((item) => parseBulkItem(item.uid, item.file));
+    newItems.forEach((item) => parseBulkItem(item.uid, item.file!));
   };
 
   const handleRemoveBulkItem = (uid: string) => {
@@ -1877,7 +2414,7 @@ export default function EnvoyApp() {
   };
 
   const dispatchBulkItem = async (uid: string): Promise<false | void> => {
-    const item = bulkItems.find((i) => i.uid === uid);
+    const item = bulkItemsRef.current.find((i) => i.uid === uid);
     if (!item?.parsed || !hasCallableNumber(item.parsed.toNumber)) return;
     setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "dispatching" } : i));
     try {
@@ -1965,39 +2502,201 @@ export default function EnvoyApp() {
     setScreen("bulk-invoice");
   };
 
-  const handleDispatchAll = async () => {
+  // Shared drain loop: dispatches items currently in "parsed" state with a phone.
+  // Returns when queue is empty. Called by both old bulk screen and new select-invoice flow.
+  const drainDispatch = async () => {
     const toDispatch = bulkItemsRef.current.filter(
       (i) => i.status === "parsed" && hasCallableNumber(i.parsed?.toNumber)
     );
     if (toDispatch.length === 0) return;
+    const queue = [...toDispatch];
+    const retries = new Map<string, number>();
+    const RETRY_WAIT = 2_000;
+    const MAX_RETRIES = 8;
+    while (queue.length > 0) {
+      const item = queue[0];
+      const result = await dispatchBulkItem(item.uid);
+      if (result === false) {
+        const n = (retries.get(item.uid) ?? 0) + 1;
+        retries.set(item.uid, n);
+        if (n >= MAX_RETRIES) {
+          setBulkItems((prev) => prev.map((i) =>
+            i.uid === item.uid ? { ...i, status: "dispatch-error", error: "Server at capacity — try again shortly" } : i
+          ));
+          queue.shift();
+          retries.delete(item.uid);
+        } else {
+          await new Promise((r) => setTimeout(r, RETRY_WAIT));
+        }
+        continue;
+      }
+      queue.shift();
+      retries.delete(item.uid);
+      if (queue.length > 0) await new Promise((r) => setTimeout(r, 1_000));
+    }
+  };
+
+  const handleDispatchAll = async () => {
+    const ready = bulkItemsRef.current.filter(
+      (i) => i.status === "parsed" && hasCallableNumber(i.parsed?.toNumber)
+    );
+    if (ready.length === 0) return;
     setIsDispatching(true);
     try {
-      // Drain loop: server 429 is backpressure — retry the head of the queue.
-      // Cap retries per item so the loop always terminates if the server stays at capacity.
-      const queue = [...toDispatch];
-      const retries = new Map<string, number>();
-      const RETRY_WAIT = 2_000;
-      const MAX_RETRIES = 8; // ~16 s per item before giving up
-      while (queue.length > 0) {
-        const item = queue[0];
-        const result = await dispatchBulkItem(item.uid);
-        if (result === false) {
-          const n = (retries.get(item.uid) ?? 0) + 1;
-          retries.set(item.uid, n);
-          if (n >= MAX_RETRIES) {
-            setBulkItems((prev) => prev.map((i) =>
-              i.uid === item.uid ? { ...i, status: "dispatch-error", error: "Server at capacity — try again shortly" } : i
-            ));
-            queue.shift();
-            retries.delete(item.uid);
-          } else {
-            await new Promise((r) => setTimeout(r, RETRY_WAIT));
-          }
-          continue;
+      await drainDispatch();
+    } finally {
+      setIsDispatching(false);
+    }
+  };
+
+  // Parse → sync spreadsheet → resolve phones → dispatch for a given set of item UIDs
+  const runInvoicePipeline = async (uids: string[]) => {
+    const uidSet = new Set(uids);
+    const targets = bulkItemsRef.current.filter((i) => uidSet.has(i.uid));
+
+    // 1. Parse all targeted items concurrently (capped).
+    // Collect results in a local map so step 2 doesn't depend on the (async) ref sync.
+    const parsedResults = new Map<string, InvoiceParseResult>();
+    const sem = createSemaphore(CONCURRENT_CALL_LIMIT);
+    await Promise.all(targets.map((item) => sem(async () => {
+      setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? { ...i, status: "parsing" } : i));
+      try {
+        const file = await getBulkItemFile(item);
+        const formData = new FormData();
+        formData.append("document", file);
+        const r = await fetch("/api/calls/parse-document", { method: "POST", body: formData });
+        const payload = await r.json() as InvoiceParseResult & { error?: string };
+        if (!r.ok) throw new Error(payload.error ?? `HTTP ${r.status}`);
+        parsedResults.set(item.uid, payload);
+        setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? { ...i, status: "parsed", parsed: payload } : i));
+      } catch (err) {
+        setBulkItems((prev) => prev.map((i) => i.uid === item.uid
+          ? { ...i, status: "parse-error", error: err instanceof Error ? err.message : "Parse failed" }
+          : i
+        ));
+      }
+    })));
+
+    // 2. Sync newly-discovered businesses to spreadsheet (awaited so step 3 reads fresh data).
+    // Build from parsedResults (not the ref) so every successfully-parsed business is included.
+    const discovered = Array.from(parsedResults.values())
+      .filter((p) => p.contactBusiness)
+      .map((p) => ({
+        businessName: p.contactBusiness!,
+        abn: p.abn ?? null,
+        contactPerson: p.contactPerson ?? null,
+      }));
+    if (discovered.length > 0) {
+      try {
+        const syncRes = await fetch("/api/drive/contacts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contacts: discovered }),
+        });
+        if (!syncRes.ok) {
+          const e = await syncRes.json().catch(() => ({}));
+          console.error("[contacts sync] write failed:", e.error ?? syncRes.status);
         }
-        queue.shift();
-        retries.delete(item.uid);
-        if (queue.length > 0) await new Promise((r) => setTimeout(r, 1_000));
+      } catch (e) {
+        console.error("[contacts sync] fetch error:", e);
+      }
+    }
+
+    // 3. Load spreadsheet rows for phone resolution
+    let contactRows: ContactRow[] = [];
+    try {
+      const cr = await fetch("/api/drive/contacts", { cache: "no-store" });
+      if (cr.ok) contactRows = (await cr.json()).rows ?? [];
+    } catch {}
+
+    // 4. Resolve phone per targeted item: spreadsheet > PDF.
+    // Build the resolved array from the authoritative parsedResults map and assign it to the
+    // ref synchronously, so the drain loop (step 5) sees the resolved phone numbers immediately
+    // rather than the stale ref (which lags behind setBulkItems until the next render).
+    const resolved = bulkItemsRef.current.map((i) => {
+      if (!uidSet.has(i.uid)) return i;
+      const parsed = parsedResults.get(i.uid);
+      if (!parsed) return i; // parse failed — leave the parse-error state set in step 1
+      const match = contactRows.find((r) => companyNamesMatch(r.businessName, parsed.contactBusiness ?? ""));
+      const sheetPhone = match?.phone || null;
+      const pdfPhone = hasCallableNumber(parsed.toNumber) ? parsed.toNumber : null;
+      const phone = sheetPhone ?? pdfPhone;
+      const person = match?.contactPerson || parsed.contactPerson || null;
+      if (!phone) {
+        return { ...i, status: "dispatch-error" as BulkStatus, error: "No phone number found — add it to the spreadsheet", phoneSource: "none" as const, parsed };
+      }
+      return {
+        ...i,
+        status: "parsed" as BulkStatus,
+        parsed: { ...parsed, toNumber: phone, contactPerson: person },
+        phoneSource: (sheetPhone ? "spreadsheet" : "pdf") as "spreadsheet" | "pdf",
+      };
+    });
+    bulkItemsRef.current = resolved;
+    setBulkItems(resolved);
+
+    // 5. Dispatch with backpressure drain
+    await drainDispatch();
+  };
+
+  // One-click dispatch from SelectInvoiceScreen.
+  // selectedUploadFiles are the files the user checked in the upload tab — they haven't
+  // been added to bulkItems yet, so we insert them (and the ref) synchronously first.
+  const handleSelectInvoiceDispatch = async (selectedUploadFiles: File[] = []) => {
+    if (selectedUploadFiles.length > 0) {
+      const seen = new Set(bulkItemsRef.current.map((i) => `${i.fileName}::${i.fileSize ?? ""}`));
+      const newItems: BulkItem[] = selectedUploadFiles
+        .filter((f) => !seen.has(`${f.name}::${f.size}`))
+        .map((f) => ({
+          uid: crypto.randomUUID(),
+          source: "upload" as BulkSource,
+          file: f,
+          fileName: f.name,
+          fileSize: f.size,
+          status: "parsing" as BulkStatus,
+        }));
+      bulkItemsRef.current = [...bulkItemsRef.current, ...newItems];
+      setBulkItems(bulkItemsRef.current);
+    }
+    if (bulkItemsRef.current.length === 0) return;
+    setScreen("bulk-summary");
+    setIsDispatching(true);
+    try {
+      await runInvoicePipeline(bulkItemsRef.current.map((i) => i.uid));
+    } finally {
+      setIsDispatching(false);
+    }
+  };
+
+  // Retry failed items from BulkSummaryScreen
+  const handleRetryFailed = async () => {
+    const items = bulkItemsRef.current;
+    const failed = (i: BulkItem) => i.status === "dispatch-error" || i.callStatus === "failed";
+    // Items that already have a resolved phone but failed to dispatch (capacity/server) → just re-drain.
+    const redriveUids = items
+      .filter((i) => failed(i) && i.parsed && hasCallableNumber(i.parsed.toNumber))
+      .map((i) => i.uid);
+    // Items needing full re-processing: parse errors, or "no phone" failures (re-resolve from the
+    // sheet so a number added since the last attempt is picked up).
+    const reprocessUids = items
+      .filter((i) => i.status === "parse-error" || (failed(i) && !(i.parsed && hasCallableNumber(i.parsed.toNumber))))
+      .map((i) => i.uid);
+    if (!redriveUids.length && !reprocessUids.length) return;
+    setIsDispatching(true);
+    try {
+      if (redriveUids.length > 0) {
+        const set = new Set(redriveUids);
+        const next = bulkItemsRef.current.map((i) =>
+          set.has(i.uid)
+            ? { ...i, status: "parsed" as BulkStatus, error: undefined, callId: undefined, callStatus: undefined, callOutcome: undefined }
+            : i
+        );
+        bulkItemsRef.current = next;
+        setBulkItems(next);
+        await drainDispatch();
+      }
+      if (reprocessUids.length > 0) {
+        await runInvoicePipeline(reprocessUids);
       }
     } finally {
       setIsDispatching(false);
@@ -2013,8 +2712,8 @@ export default function EnvoyApp() {
           calls={calls}
           loading={loading}
           onNewCall={() => setScreen("compose")}
-          onUploadInvoice={() => setScreen("invoice-compose")}
-          onSelectCall={(id) => { setActiveCallId(id); setReturnToBulk(false); setScreen("detail"); }}
+          onUploadInvoice={() => { setBulkItems([]); setScreen("select-invoice"); loadDriveFiles(); }}
+          onSelectCall={(id) => { setActiveCallId(id); setReturnToBulk(false); setReturnToSummary(false); setScreen("detail"); }}
           onRefresh={fetchCalls}
         />
       )}
@@ -2043,7 +2742,7 @@ export default function EnvoyApp() {
           isDispatching={isDispatching}
           onRetry={(uid) => {
             const item = bulkItems.find((i) => i.uid === uid);
-            if (item) {
+            if (item?.file) {
               setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "parsing", error: undefined } : i));
               parseBulkItem(uid, item.file);
             }
@@ -2062,7 +2761,11 @@ export default function EnvoyApp() {
         <Detail
           call={activeCall}
           onBack={() => {
-            if (returnToBulk) {
+            if (returnToSummary) {
+              setReturnToSummary(false);
+              setActiveCallId(null);
+              setScreen("bulk-summary");
+            } else if (returnToBulk) {
               setReturnToBulk(false);
               setActiveCallId(null);
               setScreen("bulk-invoice");
@@ -2071,6 +2774,28 @@ export default function EnvoyApp() {
               setActiveCallId(null);
             }
           }}
+        />
+      )}
+      {screen === "select-invoice" && (
+        <SelectInvoiceScreen
+          driveFiles={driveFiles}
+          driveLoading={driveLoading}
+          driveError={driveError}
+          queue={bulkItems}
+          dispatching={isDispatching}
+          onToggleDrive={toggleDriveItem}
+          onSelectAllDrive={selectAllDrive}
+          onDeselectAllDrive={deselectAllDrive}
+          onDispatch={handleSelectInvoiceDispatch}
+          onBack={() => { setBulkItems([]); setScreen("home"); }}
+        />
+      )}
+      {screen === "bulk-summary" && (
+        <BulkSummaryScreen
+          items={bulkItems}
+          onViewDetail={async (callId) => { await fetchCalls(); setActiveCallId(callId); setReturnToSummary(true); setScreen("detail"); }}
+          onBack={() => { fetchCalls(); setBulkItems([]); setScreen("home"); }}
+          onRetryFailed={handleRetryFailed}
         />
       )}
     </div>
