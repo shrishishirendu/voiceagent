@@ -70,7 +70,7 @@ interface InvoiceParseResult {
   remittanceContact?: string | null;
 }
 
-type BulkStatus = "parsing" | "parsed" | "parse-error" | "dispatching" | "dispatched" | "dispatch-error";
+type BulkStatus = "parsing" | "parsed" | "parse-error" | "paused" | "dispatching" | "dispatched" | "dispatch-error";
 type BulkSource = "upload" | "drive";
 
 interface DriveInvoiceFile {
@@ -1456,9 +1456,17 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
   );
   const isInvoice = !!call.invoiceNumber;
 
-  // For voicemail calls, show only the last Envoy line — the actual message left.
+  // For voicemail calls, show the actual message left. The AI often appends a short
+  // trailing farewell ("Goodbye.") after the voicemail script, so the LAST Envoy line is
+  // usually that farewell — not the message. The voicemail script is a full sentence
+  // (greeting + call-back request), so pick the LONGEST Envoy line instead.
   const voicemailLines = isVoicemail
-    ? (call.transcript ?? []).filter((l) => l.who === "envoy").slice(-1)
+    ? (() => {
+        const envoyLines = (call.transcript ?? []).filter((l) => l.who === "envoy");
+        if (envoyLines.length === 0) return [];
+        const longest = envoyLines.reduce((a, b) => (b.text.length > a.text.length ? b : a));
+        return [longest];
+      })()
     : [];
 
   return (
@@ -1573,7 +1581,7 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
           <Hairline />
           <section className="px-6 py-7">
             <a
-              href={call.recordingUrl}
+              href={`/api/calls/${call.id}/recording`}
               target="_blank"
               rel="noreferrer"
               className="w-full py-3.5 rounded-full border text-[0.95rem] font-medium block text-center"
@@ -2102,17 +2110,21 @@ const isInProgressItem = (i: BulkItem) =>
 function BulkSummaryScreen({
   items,
   onViewDetail,
+  onDetails,
   onBack,
   onRetryFailed,
 }: {
   items: BulkItem[];
   onViewDetail: (callId: string) => void;
+  onDetails: (uid: string) => void;
   onBack: () => void;
   onRetryFailed: () => void;
 }) {
   const anyInProgress = items.some(isInProgressItem);
   const failedCount = items.filter(isFailedItem).length;
-  const showRetry = !anyInProgress && failedCount > 0;
+  const pausedCount = items.filter((i) => i.status === "paused").length;
+  const retryCount = failedCount + pausedCount;
+  const showRetry = !anyInProgress && retryCount > 0;
 
   const answeredCount = items.filter((i) => i.callOutcome === "success" || i.callOutcome === "partial").length;
   const noAnswerCount = items.filter((i) => i.callOutcome === "no-answer").length;
@@ -2140,6 +2152,7 @@ function BulkSummaryScreen({
     if (item.status === "dispatching") return { label: "Dispatching…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
     if (item.status === "dispatch-error") return { label: "Failed", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: false };
     if (item.status === "parse-error") return { label: "Parse error", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
+    if (item.status === "paused") return { label: "Paused", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
     if (item.status === "parsed") return { label: "Ready", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
     // Default: parsing
     return { label: "Reading…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
@@ -2198,6 +2211,7 @@ function BulkSummaryScreen({
         {items.map((item) => {
           const badge = getSummaryBadge(item);
           const isSettled = item.callStatus === "completed" || item.callStatus === "failed";
+          const canEdit = item.status === "parsing" || item.status === "parsed" || item.status === "paused" || item.status === "dispatch-error";
           const title = item.parsed?.contactBusiness || item.fileName;
           const subtitle = [
             fmtAmount(item.parsed?.currency, item.parsed?.amountDue) || null,
@@ -2227,6 +2241,22 @@ function BulkSummaryScreen({
                   <p className="text-[0.72rem] mt-1.5" style={{ color: "var(--muted-light)" }}>Tap to view transcript →</p>
                 )}
               </div>
+              {canEdit && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Edit details"
+                  onClick={(e) => { e.stopPropagation(); onDetails(item.uid); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onDetails(item.uid); } }}
+                  className="shrink-0 flex items-center justify-center w-8 h-8 rounded-full transition active:scale-95"
+                  style={{ color: "var(--muted)", background: "var(--cream-dark)", cursor: "pointer" }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                    <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                  </svg>
+                </span>
+              )}
               <span
                 className={`text-[0.78rem] font-medium px-2.5 py-1 rounded-full shrink-0 ${badge.pulsing ? "dot-pulse" : ""}`}
                 style={{ background: badge.bg, color: badge.fg }}
@@ -2244,7 +2274,7 @@ function BulkSummaryScreen({
             className="w-full py-3.5 rounded-full font-medium text-[0.95rem] transition active:scale-[0.98]"
             style={{ background: "var(--burgundy)", color: "var(--cream)" }}
           >
-            Retry failed ({failedCount})
+            Retry all ({retryCount})
           </button>
         </div>
       )}
@@ -2261,6 +2291,7 @@ export default function EnvoyApp() {
   const [activeCallId, setActiveCallId] = useState<string | null>(null);
   const [bulkItems, setBulkItems] = useState<BulkItem[]>([]);
   const [reviewBulkUid, setReviewBulkUid] = useState<string | null>(null);
+  const [summaryEditUid, setSummaryEditUid] = useState<string | null>(null);
   const [returnToBulk, setReturnToBulk] = useState(false);
   const [returnToSummary, setReturnToSummary] = useState(false);
   const [isDispatching, setIsDispatching] = useState(false);
@@ -2553,6 +2584,75 @@ export default function EnvoyApp() {
     setScreen("bulk-invoice");
   };
 
+  const openSummaryDetails = (uid: string) => {
+    const next = bulkItemsRef.current.map((i) =>
+      i.uid === uid ? { ...i, status: "paused" as BulkStatus, error: undefined } : i
+    );
+    bulkItemsRef.current = next;
+    setBulkItems(next);
+    setSummaryEditUid(uid);
+  };
+
+  const saveSummaryDetails = (state: BulkFormState) => {
+    const uid = summaryEditUid;
+    if (uid) {
+      setBulkItems((prev) => prev.map((i) => {
+        if (i.uid !== uid || !i.parsed) return i;
+        return {
+          ...i,
+          status: "paused" as BulkStatus,
+          parsed: {
+            ...i.parsed,
+            toNumber: hasCallableNumber(state.toNumber) ? state.toNumber.trim() : null,
+            contactBusiness: state.contactBusiness || null,
+            contactPerson: state.contactPerson || null,
+            vendorName: state.vendorName || null,
+            invoiceNumber: state.invoiceNumber || null,
+            invoiceDate: state.invoiceDate || null,
+            dueDate: state.dueDate || null,
+            amountDue: state.amountDue.trim() ? Number(state.amountDue) : null,
+            currency: state.currency || null,
+            lineItems: state.lineItems || null,
+            invoiceNotes: state.invoiceNotes || null,
+            bankName: state.bankName || null,
+            bsb: state.bsb || null,
+            accountNumber: state.accountNumber || null,
+            swiftCode: state.swiftCode || null,
+            abn: state.abn || null,
+            remittanceName: state.remittanceName || null,
+            remittanceContact: state.remittanceContact || null,
+          },
+        };
+      }));
+    }
+    setSummaryEditUid(null);
+  };
+
+  const summaryDetailsDispatch = async (brief: any) => {
+    const uid = summaryEditUid;
+    if (!uid) throw new Error("No bulk item selected");
+    setBulkItems((prev) => prev.map((i) =>
+      i.uid === uid ? { ...i, status: "dispatching" as BulkStatus, error: undefined } : i
+    ));
+    const r = await fetch("/api/calls/dispatch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(brief),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      setBulkItems((prev) => prev.map((i) =>
+        i.uid === uid ? { ...i, status: "paused" as BulkStatus } : i
+      ));
+      throw new Error(e.error ?? `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    setBulkItems((prev) => prev.map((i) =>
+      i.uid === uid ? { ...i, status: "dispatched" as BulkStatus, callId: data.id } : i
+    ));
+    setSummaryEditUid(null);
+  };
+
   // Shared drain loop: dispatches items currently in "parsed" state with a phone.
   // Returns when queue is empty. Called by both old bulk screen and new select-invoice flow.
   const drainDispatch = async () => {
@@ -2618,7 +2718,9 @@ export default function EnvoyApp() {
     const parsedResults = new Map<string, InvoiceParseResult>();
     const sem = createSemaphore(CONCURRENT_CALL_LIMIT);
     await Promise.all(targets.map((item) => sem(async () => {
-      setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? { ...i, status: "parsing" } : i));
+      if (bulkItemsRef.current.find((i) => i.uid === item.uid)?.status !== "paused") {
+        setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? { ...i, status: "parsing" } : i));
+      }
       try {
         const file = await getBulkItemFile(item);
         const formData = new FormData();
@@ -2648,9 +2750,11 @@ export default function EnvoyApp() {
           return;
         }
 
+        // Preserve "paused" if the user clicked the icon while this item was parsing.
+        const wasPaused = bulkItemsRef.current.find((i) => i.uid === item.uid)?.status === "paused";
         const resolved: BulkItem = {
           ...item,
-          status: "parsed",
+          status: wasPaused ? "paused" : "parsed",
           parsed: { ...payload, toNumber: phone, contactPerson: person },
           phoneSource: sheetPhone ? "spreadsheet" : "pdf",
         };
@@ -2662,6 +2766,8 @@ export default function EnvoyApp() {
         const MAX_RETRIES = 8;
         let attempts = 0;
         while (true) {
+          // Honor a pause requested while this item was parsing/queued.
+          if (bulkItemsRef.current.find((i) => i.uid === item.uid)?.status === "paused") return;
           const result = await dispatchBulkItem(item.uid);
           if (result !== false) break;
           attempts++;
@@ -2731,14 +2837,18 @@ export default function EnvoyApp() {
   const handleRetryFailed = async () => {
     const items = bulkItemsRef.current;
     const failed = (i: BulkItem) => i.status === "dispatch-error" || i.callStatus === "failed";
-    // Items that already have a resolved phone but failed to dispatch (capacity/server) → just re-drain.
+    // Items that already have a resolved phone but failed to dispatch or are paused → just re-drain.
     const redriveUids = items
-      .filter((i) => failed(i) && i.parsed && hasCallableNumber(i.parsed.toNumber))
+      .filter((i) => (failed(i) || i.status === "paused") && i.parsed && hasCallableNumber(i.parsed.toNumber))
       .map((i) => i.uid);
-    // Items needing full re-processing: parse errors, or "no phone" failures (re-resolve from the
-    // sheet so a number added since the last attempt is picked up).
+    // Items needing full re-processing: parse errors, "no phone" failures, or paused items whose
+    // phone was blanked during editing (re-resolve from the sheet).
     const reprocessUids = items
-      .filter((i) => i.status === "parse-error" || (failed(i) && !(i.parsed && hasCallableNumber(i.parsed.toNumber))))
+      .filter((i) =>
+        i.status === "parse-error" ||
+        (failed(i) && !(i.parsed && hasCallableNumber(i.parsed.toNumber))) ||
+        (i.status === "paused" && !(i.parsed && hasCallableNumber(i.parsed.toNumber)))
+      )
       .map((i) => i.uid);
     if (!redriveUids.length && !reprocessUids.length) return;
     setIsDispatching(true);
@@ -2853,10 +2963,42 @@ export default function EnvoyApp() {
         <BulkSummaryScreen
           items={bulkItems}
           onViewDetail={async (callId) => { await fetchCalls(); setActiveCallId(callId); setReturnToSummary(true); setScreen("detail"); }}
+          onDetails={openSummaryDetails}
           onBack={() => { fetchCalls(); setBulkItems([]); setScreen("home"); }}
           onRetryFailed={handleRetryFailed}
         />
       )}
+      {screen === "bulk-summary" && summaryEditUid && (() => {
+        const editItem = bulkItems.find((i) => i.uid === summaryEditUid);
+        return (
+          <div className="absolute inset-0" style={{ background: "var(--cream)", zIndex: 3 }}>
+            {editItem?.parsed ? (
+              <InvoiceCompose
+                key={`summary-${summaryEditUid}`}
+                onCancel={() => setSummaryEditUid(null)}
+                onPlace={summaryDetailsDispatch}
+                preloaded={{ parsed: editItem.parsed }}
+                onBackWithState={saveSummaryDetails}
+              />
+            ) : (
+              <div className="min-h-screen flex flex-col items-center justify-center gap-3 pb-24">
+                <div
+                  className="w-5 h-5 rounded-full border-2 animate-spin"
+                  style={{ borderColor: "var(--hairline)", borderTopColor: "var(--ink)" }}
+                />
+                <p className="text-[0.88rem]" style={{ color: "var(--muted)" }}>Reading invoice…</p>
+                <button
+                  onClick={() => setSummaryEditUid(null)}
+                  className="mt-2 text-[0.82rem]"
+                  style={{ color: "var(--muted)" }}
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
