@@ -220,11 +220,18 @@ Set the same env vars in Vercel Dashboard → Project Settings → Environment V
 
 ## Cost per call (rough)
 
-- Twilio outbound (US → AU mobile): ~$0.20/min
-- Vapi platform fee: ~$0.05/min
-- Deepgram STT: ~$0.005/min (included in Vapi)
-- ElevenLabs TTS: ~$0.06/min (included in Vapi)
-- Claude LLM: ~$0.01/min (via your Anthropic key)
+**Monthly fixed**
+- Twilio AU number rental: ~$2.25 USD/month
 
-**~$0.32/min** for US→AU. Most calls are 2–4 mins → ~$0.65–1.30 each.
-AU→AU with a real AU number drops to ~$0.12/min.
+**Per minute (usage)**
+- Twilio PSTN — AU→AU mobile: ~$0.05/min
+- Twilio PSTN — AU→AU landline: ~$0.024/min
+- Twilio voicemail detection (AMD): ~$0.005/call
+- Vapi platform fee: ~$0.05/min
+- Deepgram STT: bundled in Vapi (~$0.006/min)
+- ElevenLabs TTS (via Vapi, no separate account): ~$0.10/min
+- Claude Sonnet 4.6 (via Vapi): ~$0.04/min
+
+**~$0.24/min** (mobile) or **~$0.21/min** (landline). Most calls are 2–4 mins → ~$0.48–$0.96 each (mobile).
+
+> Note: Claude is billed through Vapi's account — the `ANTHROPIC_API_KEY` env var is accepted but not currently forwarded to Vapi.

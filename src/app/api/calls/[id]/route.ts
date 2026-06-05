@@ -151,6 +151,7 @@ export async function GET(
     transcript: (() => { try { return call.transcript ? JSON.parse(call.transcript) : []; } catch { return []; } })(),
     recordingUrl: call.recordingUrl,
     endedReason: call.endedReason,
+    voicemailScript: call.voicemailScript ?? null,
     invoiceNumber: call.invoiceNumber ?? null,
     createdAt: call.createdAt,
     pollError,

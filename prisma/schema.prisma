@@ -43,6 +43,7 @@ model Call {
   result          String?
   summary         String?
   transcript      String?  // JSON string of [{who, text}]
+  voicemailScript String?
   recordingUrl    String?
 
   createdAt       DateTime @default(now())

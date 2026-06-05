@@ -21,6 +21,7 @@ export async function GET() {
       transcript: (() => { try { return c.transcript ? JSON.parse(c.transcript) : []; } catch { return []; } })(),
       recordingUrl: c.recordingUrl,
       endedReason: c.endedReason ?? null,
+      voicemailScript: c.voicemailScript ?? null,
       invoiceNumber: c.invoiceNumber ?? null,
       createdAt: c.createdAt,
     })),

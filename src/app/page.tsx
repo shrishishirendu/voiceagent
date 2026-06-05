@@ -45,6 +45,7 @@ interface Call {
   transcript: TranscriptLine[];
   recordingUrl: string | null;
   endedReason: string | null;
+  voicemailScript: string | null;
   invoiceNumber: string | null;
   createdAt: string;
 }
@@ -1456,16 +1457,26 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
   );
   const isInvoice = !!call.invoiceNumber;
 
-  // For voicemail calls, show the actual message left. The AI often appends a short
-  // trailing farewell ("Goodbye.") after the voicemail script, so the LAST Envoy line is
-  // usually that farewell — not the message. The voicemail script is a full sentence
-  // (greeting + call-back request), so pick the LONGEST Envoy line instead.
+  // For voicemail calls, show the actual message left.
+  // Two detection paths exist:
+  // - Vapi-detected (endedReason = voicemail/machine): Vapi speaks its static voicemailMessage
+  //   TTS directly — this never appears in messages[]. Use the stored voicemailScript instead.
+  // - AI-detected (VOICEMAIL_RE matched transcript content): Claude said the vmScript as a
+  //   conversational message — it IS in messages[]. Skip the opening greeting (index 0) and
+  //   pick the longest remaining Envoy message.
   const voicemailLines = isVoicemail
     ? (() => {
+        const vapiDetected = !!(call.endedReason && /voicemail|machine/i.test(call.endedReason));
+        if (vapiDetected && call.voicemailScript) {
+          return [{ who: "envoy" as const, text: call.voicemailScript }];
+        }
         const envoyLines = (call.transcript ?? []).filter((l) => l.who === "envoy");
-        if (envoyLines.length === 0) return [];
-        const longest = envoyLines.reduce((a, b) => (b.text.length > a.text.length ? b : a));
-        return [longest];
+        const candidates = envoyLines.slice(1); // skip opening greeting
+        if (candidates.length > 0) {
+          return [candidates.reduce((a, b) => (b.text.length > a.text.length ? b : a))];
+        }
+        if (call.voicemailScript) return [{ who: "envoy" as const, text: call.voicemailScript }];
+        return [];
       })()
     : [];
 
@@ -2124,7 +2135,7 @@ function BulkSummaryScreen({
   const failedCount = items.filter(isFailedItem).length;
   const pausedCount = items.filter((i) => i.status === "paused").length;
   const retryCount = failedCount + pausedCount;
-  const showRetry = !anyInProgress && retryCount > 0;
+  const showRetry = retryCount > 0;
 
   const answeredCount = items.filter((i) => i.callOutcome === "success" || i.callOutcome === "partial").length;
   const noAnswerCount = items.filter((i) => i.callOutcome === "no-answer").length;
@@ -2506,8 +2517,6 @@ export default function EnvoyApp() {
         body: JSON.stringify(buildBulkBrief(item.parsed)),
       });
       if (r.status === 429) {
-        // Server at capacity — reset so the drain loop can retry this item
-        setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "parsed" } : i));
         return false;
       }
       if (!r.ok) {
@@ -2661,28 +2670,16 @@ export default function EnvoyApp() {
     );
     if (toDispatch.length === 0) return;
     const queue = [...toDispatch];
-    const retries = new Map<string, number>();
-    const RETRY_WAIT = 2_000;
-    const MAX_RETRIES = 8;
+    const CAPACITY_WAIT = 10_000;
     while (queue.length > 0) {
       const item = queue[0];
       const result = await dispatchBulkItem(item.uid);
       if (result === false) {
-        const n = (retries.get(item.uid) ?? 0) + 1;
-        retries.set(item.uid, n);
-        if (n >= MAX_RETRIES) {
-          setBulkItems((prev) => prev.map((i) =>
-            i.uid === item.uid ? { ...i, status: "dispatch-error", error: "Server at capacity — try again shortly" } : i
-          ));
-          queue.shift();
-          retries.delete(item.uid);
-        } else {
-          await new Promise((r) => setTimeout(r, RETRY_WAIT));
-        }
+        // Server at capacity — wait and retry indefinitely until a slot opens
+        await new Promise((r) => setTimeout(r, CAPACITY_WAIT));
         continue;
       }
       queue.shift();
-      retries.delete(item.uid);
       if (queue.length > 0) await new Promise((r) => setTimeout(r, 1_000));
     }
   };
@@ -2762,22 +2759,14 @@ export default function EnvoyApp() {
         setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? resolved : i));
 
         // Dispatch immediately with backpressure retry.
-        const RETRY_WAIT = 2_000;
-        const MAX_RETRIES = 8;
-        let attempts = 0;
+        const CAPACITY_WAIT = 10_000;
         while (true) {
           // Honor a pause requested while this item was parsing/queued.
           if (bulkItemsRef.current.find((i) => i.uid === item.uid)?.status === "paused") return;
           const result = await dispatchBulkItem(item.uid);
           if (result !== false) break;
-          attempts++;
-          if (attempts >= MAX_RETRIES) {
-            setBulkItems((prev) => prev.map((i) =>
-              i.uid === item.uid ? { ...i, status: "dispatch-error", error: "Server at capacity — try again shortly" } : i
-            ));
-            break;
-          }
-          await new Promise((res) => setTimeout(res, RETRY_WAIT));
+          // Server at capacity — wait and retry indefinitely until a slot opens
+          await new Promise((res) => setTimeout(res, CAPACITY_WAIT));
         }
       } catch (err) {
         setBulkItems((prev) => prev.map((i) => i.uid === item.uid

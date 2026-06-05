@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { dispatchVapiCall } from "@/lib/vapi";
+import { dispatchVapiCall, buildVoicemailMessage } from "@/lib/vapi";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
@@ -86,6 +86,7 @@ export async function POST(req: NextRequest) {
     remittanceContact,
   } = parsed.data;
   const normalisedNumber = normalisePhone(toNumber);
+  const voicemailScript = buildVoicemailMessage({ contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate });
 
   // Required env
   const missing: string[] = [];
@@ -154,6 +155,7 @@ export async function POST(req: NextRequest) {
         abn,
         remittanceName,
         remittanceContact,
+        voicemailScript,
         status: "dispatching",
       },
     });

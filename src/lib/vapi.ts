@@ -72,6 +72,22 @@ function formatLineItems(lineItems: string, currency: string): string {
   }
 }
 
+interface BuildVoicemailMessageArgs {
+  contactBusiness: string;
+  userName: string;
+  invoiceNumber?: string | null;
+  amountDue?: number | null;
+  currency?: string | null;
+  dueDate?: string | null;
+}
+
+export function buildVoicemailMessage(args: BuildVoicemailMessageArgs): string {
+  const { contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate } = args;
+  return invoiceNumber
+    ? `Hi, this is a message for ${contactBusiness}. Envoy is calling on behalf of ${userName} regarding an outstanding invoice${amountDue != null ? ` of ${fmtAmount(currency, amountDue)}` : ""}${dueDate ? `, due ${dueDate}` : ""}. Please give us a call back at your earliest convenience. Thank you.`
+    : `Hi, this is a message for ${contactBusiness}. Envoy is calling on behalf of ${userName}. We tried to reach you but weren't able to connect. Please give us a call back at your earliest convenience. Thank you.`;
+}
+
 interface BuildSystemPromptArgs {
   userName: string;
   contactBusiness: string;
@@ -115,9 +131,7 @@ export function buildSystemPrompt(args: BuildSystemPromptArgs): string {
   } = args;
 
   // Explicit voicemail script so the AI says something useful rather than "Goodbye."
-  const vmScript = invoiceNumber
-    ? `Hi, this is a message for ${contactBusiness}. Envoy is calling on behalf of ${userName} regarding an outstanding invoice${amountDue != null ? ` of ${fmtAmount(currency, amountDue)}` : ""}${dueDate ? `, due ${dueDate}` : ""}. Please give us a call back at your earliest convenience. Thank you.`
-    : `Hi, this is a message for ${contactBusiness}. Envoy is calling on behalf of ${userName}. We tried to reach you but weren't able to connect. Please give us a call back at your earliest convenience. Thank you.`;
+  const vmScript = buildVoicemailMessage({ contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate });
 
   return `You are Envoy, a polite AI agent placing a phone call on behalf of ${userName}. You're calling ${contactBusiness}.${
     contactPerson
@@ -281,9 +295,14 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
         voicemailDetectionTypes: ["machine_end_beep", "machine_end_silence", "machine_end_other"],
         enabled: true,
       },
-      voicemailMessage: args.invoiceNumber
-        ? `Hi, this is a message for ${args.contactBusiness}. Envoy is calling on behalf of ${args.userName} regarding an outstanding invoice. We're following up on payment and would appreciate a call back at your earliest convenience. Thank you.`
-        : `Hi, this is Envoy calling on behalf of ${args.userName}. We tried to reach you but weren't able to connect. Please call back at your earliest convenience. Thank you.`,
+      voicemailMessage: buildVoicemailMessage({
+        contactBusiness: args.contactBusiness,
+        userName: args.userName,
+        invoiceNumber: args.invoiceNumber,
+        amountDue: args.amountDue,
+        currency: args.currency,
+        dueDate: args.dueDate,
+      }),
       backgroundDenoisingEnabled: true,
       // Webhook target on the assistant (inline assistant config)
       server: {

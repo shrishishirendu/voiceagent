@@ -178,6 +178,16 @@ export async function POST(req: NextRequest) {
         ? "no-answer"
         : deriveOutcome(endedReason ?? undefined, msg.analysis?.successEvaluation);
 
+      if (isVoicemailDetected) {
+        console.log(
+          "[webhook] voicemail – endedReason=%s messages=%d vapiDetected=%s voicemailScript=%s",
+          endedReason ?? "(none)",
+          rawMessages.length,
+          !!(endedReason && /voicemail|machine/i.test(endedReason)),
+          call.voicemailScript ? "present" : "absent"
+        );
+      }
+
       // Try to extract a one-line "result" from the summary
       const result = summary
         ? summary.split(/[.\n]/).find((s) => s.trim().length > 10)?.trim() ?? null
