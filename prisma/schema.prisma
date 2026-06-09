@@ -15,7 +15,7 @@ model Call {
   contactPerson   String?
   toNumber        String
   objective       String
-  voice           String   @default("marcus")
+  voice           String   @default("iris")
   manner          String   @default("warm")
   invoiceNumber   String?
   invoiceDate     String?
@@ -31,6 +31,9 @@ model Call {
   abn             String?
   remittanceName  String?
   remittanceContact String?
+
+  // Aggregated invoices chased by this call (empty for legacy single-invoice / non-invoice calls)
+  invoices        Invoice[]
 
   // Vapi state
   vapiCallId      String?  @unique
@@ -48,4 +51,64 @@ model Call {
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+// One row per parsed invoice / debt. Also serves as the dispatch queue:
+// the scheduler groups pending rows by groupKey into a single Call per debtor.
+model Invoice {
+  id              String   @id @default(cuid())
+
+  // Debtor identity (used for grouping + dialing)
+  contactBusiness String
+  contactPerson   String?
+  toNumber        String?
+  abn             String?
+  groupKey        String   // computed: abn || normalizeBusinessName(contactBusiness)
+
+  // Caller / call config carried from ingestion
+  userName        String   @default("the caller")
+  voice           String   @default("iris")
+  manner          String   @default("warm")
+  objective       String
+
+  // Invoice fields (mirror of Call's invoice columns)
+  invoiceNumber   String?
+  invoiceDate     String?
+  dueDate         String?
+  amountDue       Float?
+  currency        String?
+  lineItems       String?  // JSON string
+  invoiceNotes    String?
+  bankName        String?
+  bsb             String?
+  accountNumber   String?
+  swiftCode       String?
+  remittanceName  String?
+  remittanceContact String?
+
+  // Scheduling / lifecycle
+  chaseAfter      DateTime // dueDate + Settings.dueOffsetDays; eligible when <= now
+  status          String   @default("pending") // pending | queued | calling | resolved | failed | cancelled
+  attempts        Int      @default(0)
+  callId          String?
+  call            Call?    @relation(fields: [callId], references: [id])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([status, chaseAfter])
+  @@index([groupKey])
+}
+
+// Singleton runtime config (one row, id = "singleton").
+model Settings {
+  id            String  @id @default("singleton")
+  bhStartHour   Int     @default(9)            // 9am
+  bhEndHour     Int     @default(17)           // 5pm
+  bhDays        String  @default("1,2,3,4,5")  // ISO weekdays Mon-Fri
+  timezone      String  @default("Australia/Sydney")
+  dueOffsetDays Int     @default(0)            // chase dueDate + N days
+  sortField     String  @default("overdue")   // overdue | amount
+  sortDir       String  @default("asc")        // asc | desc (overdue+asc = most overdue first)
+  schedulerOn   Boolean @default(true)
 }

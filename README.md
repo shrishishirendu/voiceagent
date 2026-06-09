@@ -73,10 +73,19 @@ Copy the `https://...ngrok-free.app` URL into `.env` as `PUBLIC_URL`.
 ## 5. Run the app
 
 ```bash
-npm run dev
+npm run dev:all   # web app + scheduler worker together
+# or run them separately:
+npm run dev       # web app only
+npm run scheduler # scheduler worker only (dials queued invoices)
 ```
 
 Open **http://localhost:3000**.
+
+> The **scheduler worker** must be running for queued invoices to be dialed. Selecting invoices now
+> *queues* them (grouped per debtor, dialed within business hours in your chosen order) rather than
+> calling immediately. Configure business hours, timezone, due-date offset and call order on the
+> **Settings** screen (reachable from the **Queue** screen). Use **Run scheduler now** on the Queue
+> screen to fire a tick on demand.
 
 ---
 
@@ -147,7 +156,8 @@ Phone resolution priority per invoice: **spreadsheet Phone column** → **number
 | "Dispatch failed: 401" | Wrong `VAPI_PRIVATE_KEY` |
 | "Number not verified" | Trial Twilio — verify the destination in Twilio Console |
 | Phone rings but call drops | Vapi can't reach Twilio — check SID/Auth Token |
-| Call connects but no AI voice | Anthropic key invalid, or ElevenLabs voice ID issue |
+| Call connects but no AI voice / `pipeline-error-eleven-labs-*` | The **Aria/Arjun** voices are community Voice Library voices needing a **paid** ElevenLabs plan — connect your own key in Vapi → Provider Keys and **Add** each voice so it syncs. **Theo** is a premade voice and works on Vapi's bundled key with no paid plan |
+| Hindi call but agent replies in English | The **Theo** voice drives Hindi (Deepgram nova-3 `multi` + Hindi greeting/prompt); Aria/Arjun are English-only |
 | Call completes but no summary | `PUBLIC_URL` doesn't match live ngrok URL, or ngrok isn't running |
 | Invoice parsing fails | `GEMINI_API_KEY` missing or invalid |
 | Drive tab shows no files | `GOOGLE_DRIVE_FOLDER_ID` wrong, or Drive API not enabled, or folder not shared with service account |

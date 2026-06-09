@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { dispatchVapiCall, buildVoicemailMessage } from "@/lib/vapi";
+import { dispatchVapiCall, buildVoicemailMessage, getVoiceLanguage, getVoiceGender } from "@/lib/vapi";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
@@ -27,7 +27,7 @@ const BriefSchema = z.object({
   contactPerson: z.string().max(120).optional(),
   toNumber: z.string().min(6).max(20).regex(/^\+?[0-9 \-()]+$/, "Must be a phone number"),
   objective: z.string().min(10).max(2000),
-  voice: z.enum(["marcus", "iris", "theo"]).default("iris"),
+  voice: z.enum(["iris", "arjun", "theo"]).default("iris"),
   manner: z.enum(["warm", "crisp", "formal"]).default("warm"),
   userName: z.string().min(1).max(60).default("the caller"),
   invoiceNumber: z.string().optional(),
@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
     remittanceContact,
   } = parsed.data;
   const normalisedNumber = normalisePhone(toNumber);
-  const voicemailScript = buildVoicemailMessage({ contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate });
+  const voicemailScript = buildVoicemailMessage({ contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate, language: getVoiceLanguage(voice), gender: getVoiceGender(voice) });
 
   // Required env
   const missing: string[] = [];

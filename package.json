@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
+    "dev:all": "concurrently -n web,worker -c blue,magenta \"npm:dev\" \"npm:scheduler\"",
+    "scheduler": "tsx scripts/scheduler.ts",
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
@@ -13,8 +15,10 @@
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",
+    "dotenv": "^16.4.5",
     "googleapis": "^173.0.0",
     "next": "14.2.15",
+    "node-cron": "^3.0.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "xlsx": "^0.18.5",
@@ -22,12 +26,15 @@
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
+    "@types/node-cron": "^3.0.11",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.0",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.0.1",
     "postcss": "^8.4.47",
     "prisma": "^5.20.0",
     "tailwindcss": "^3.4.13",
+    "tsx": "^4.19.1",
     "typescript": "^5.6.2"
   }
 }

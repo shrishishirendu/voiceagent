@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { MAX_INVOICE_ATTEMPTS } from "@/lib/dispatcher";
 
 /**
  * Vapi webhook receiver.
@@ -210,6 +211,32 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         console.error("[webhook] end-of-call-report DB write failed", err);
         return NextResponse.json({ ok: false, error: "db error" }, { status: 500 });
+      }
+
+      // Resolve or requeue any invoices aggregated into this call. A reached contact
+      // (success/partial) settles them; no-answer/failed requeues under the attempt cap
+      // (chaseAfter ~24h out; the worker's business-hours gate still applies).
+      try {
+        if (outcome === "success" || outcome === "partial") {
+          await prisma.invoice.updateMany({
+            where: { callId: call.id, status: "calling" },
+            data: { status: "resolved" },
+          });
+        } else {
+          const linked = await prisma.invoice.findMany({ where: { callId: call.id, status: "calling" } });
+          for (const inv of linked) {
+            if (inv.attempts >= MAX_INVOICE_ATTEMPTS) {
+              await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed", callId: null } });
+            } else {
+              await prisma.invoice.update({
+                where: { id: inv.id },
+                data: { status: "pending", callId: null, chaseAfter: new Date(Date.now() + 24 * 60 * 60 * 1000) },
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[webhook] invoice resolution failed", err);
       }
       break;
     }

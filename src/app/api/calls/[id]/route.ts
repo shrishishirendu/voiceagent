@@ -138,6 +138,12 @@ export async function GET(
     }
   }
 
+  // Invoices aggregated into this call (empty for legacy single-invoice / non-invoice calls).
+  const linkedInvoices = await prisma.invoice.findMany({
+    where: { callId: call.id },
+    orderBy: { dueDate: "asc" },
+  });
+
   return NextResponse.json({
     id: call.id,
     contactBusiness: call.contactBusiness,
@@ -153,6 +159,17 @@ export async function GET(
     endedReason: call.endedReason,
     voicemailScript: call.voicemailScript ?? null,
     invoiceNumber: call.invoiceNumber ?? null,
+    amountDue: call.amountDue ?? null,
+    currency: call.currency ?? null,
+    invoices: linkedInvoices.map((i) => ({
+      id: i.id,
+      invoiceNumber: i.invoiceNumber,
+      invoiceDate: i.invoiceDate,
+      dueDate: i.dueDate,
+      amountDue: i.amountDue,
+      currency: i.currency,
+      status: i.status,
+    })),
     createdAt: call.createdAt,
     pollError,
   }, { headers: { "Cache-Control": "no-store" } });

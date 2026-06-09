@@ -47,7 +47,47 @@ interface Call {
   endedReason: string | null;
   voicemailScript: string | null;
   invoiceNumber: string | null;
+  amountDue?: number | null;
+  currency?: string | null;
+  invoices?: LinkedInvoice[];
   createdAt: string;
+}
+
+// An invoice aggregated into a call (returned by GET /api/calls/[id]).
+interface LinkedInvoice {
+  id: string;
+  invoiceNumber: string | null;
+  invoiceDate: string | null;
+  dueDate: string | null;
+  amountDue: number | null;
+  currency: string | null;
+  status: string;
+}
+
+// An invoice sitting in the scheduling queue (returned by GET /api/invoices).
+interface QueuedInvoice {
+  id: string;
+  contactBusiness: string;
+  abn: string | null;
+  groupKey: string;
+  invoiceNumber: string | null;
+  dueDate: string | null;
+  amountDue: number | null;
+  currency: string | null;
+  status: string;
+  chaseAfter: string;
+  toNumber: string | null;
+}
+
+interface SchedulerSettings {
+  bhStartHour: number;
+  bhEndHour: number;
+  bhDays: string;
+  timezone: string;
+  dueOffsetDays: number;
+  sortField: "overdue" | "amount";
+  sortDir: "asc" | "desc";
+  schedulerOn: boolean;
 }
 
 interface InvoiceParseResult {
@@ -71,7 +111,7 @@ interface InvoiceParseResult {
   remittanceContact?: string | null;
 }
 
-type BulkStatus = "parsing" | "parsed" | "parse-error" | "paused" | "dispatching" | "dispatched" | "dispatch-error";
+type BulkStatus = "parsing" | "parsed" | "parse-error" | "paused" | "dispatching" | "dispatched" | "dispatch-error" | "queueing" | "queued";
 type BulkSource = "upload" | "drive";
 
 interface DriveInvoiceFile {
@@ -280,6 +320,7 @@ function Home({
   onUploadInvoice,
   onSelectCall,
   onRefresh,
+  onOpenQueue,
 }: {
   calls: Call[];
   loading: boolean;
@@ -287,6 +328,7 @@ function Home({
   onUploadInvoice: () => void;
   onSelectCall: (id: string) => void;
   onRefresh: () => void;
+  onOpenQueue: () => void;
 }) {
   const resolved = calls.filter((c) => c.outcome === "success").length;
   const failed = calls.filter((c) => c.outcome === "failed").length;
@@ -296,16 +338,25 @@ function Home({
       <header className="px-6 pt-12 pb-7">
         <div className="flex items-center justify-between mb-10">
           <Brand size="lg" />
-          <button
-            onClick={onRefresh}
-            className="w-9 h-9 rounded-full flex items-center justify-center border"
-            style={{ background: "var(--cream-light)", borderColor: "var(--hairline)" }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink)" strokeWidth="1.5">
-              <path d="M23 4v6h-6M1 20v-6h6" />
-              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
-            </svg>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onOpenQueue}
+              className="h-9 px-3.5 rounded-full flex items-center justify-center border smallcaps"
+              style={{ background: "var(--cream-light)", borderColor: "var(--hairline)", color: "var(--ink)" }}
+            >
+              Queue
+            </button>
+            <button
+              onClick={onRefresh}
+              className="w-9 h-9 rounded-full flex items-center justify-center border"
+              style={{ background: "var(--cream-light)", borderColor: "var(--hairline)" }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink)" strokeWidth="1.5">
+                <path d="M23 4v6h-6M1 20v-6h6" />
+                <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <h1 className="font-display text-[2.6rem] leading-[1.05] font-light tracking-tight">
@@ -442,9 +493,9 @@ function Compose({ onCancel, onPlace }: { onCancel: () => void; onPlace: (b: any
   const [error, setError] = useState<string | null>(null);
 
   const voices = [
-    { id: "marcus", name: "Marcus", desc: "Steady, AU male" },
-    { id: "iris", name: "Iris", desc: "Warm, AU female" },
-    { id: "theo", name: "Theo", desc: "Crisp, UK male" },
+    { id: "iris", name: "Iris", desc: "Warm, female" },
+    { id: "arjun", name: "Arjun", desc: "Natural, Indian male" },
+    { id: "theo", name: "Theo", desc: "Hindi/Hinglish, male" },
   ];
   const manners = [
     { id: "warm", name: "Warm", desc: "Friendly, conversational" },
@@ -674,9 +725,9 @@ function InvoiceCompose({
   );
 
   const voices = [
-    { id: "marcus", name: "Marcus", desc: "Steady, AU male" },
-    { id: "iris", name: "Iris", desc: "Warm, AU female" },
-    { id: "theo", name: "Theo", desc: "Crisp, UK male" },
+    { id: "iris", name: "Iris", desc: "Warm, female" },
+    { id: "arjun", name: "Arjun", desc: "Natural, Indian male" },
+    { id: "theo", name: "Theo", desc: "Hindi/Hinglish, male" },
   ];
   const manners = [
     { id: "warm", name: "Warm", desc: "Friendly, conversational" },
@@ -1450,6 +1501,19 @@ function Live({
 
 function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
   const oc = outcomeStyle(call.outcome);
+  const isInvoiceLead = !!call.invoiceNumber;
+  // Aggregated invoices for this call are not in the calls list payload — fetch them.
+  const [linkedInvoices, setLinkedInvoices] = useState<LinkedInvoice[]>(call.invoices ?? []);
+  useEffect(() => {
+    if (!isInvoiceLead) return;
+    let cancelled = false;
+    fetch(`/api/calls/${call.id}`, { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled && Array.isArray(d.invoices)) setLinkedInvoices(d.invoices); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [call.id, isInvoiceLead]);
+  const aggregateTotal = linkedInvoices.reduce((s, i) => s + (i.amountDue ?? 0), 0);
   const VOICEMAIL_PHRASES = /audio message|leave a message|leave your message|not available|unavailable|voicemail|answering machine|at the tone|after the beep|record your message|send a message/i;
   const isVoicemail = !!(
     (call.endedReason && /voicemail|machine/i.test(call.endedReason)) ||
@@ -1528,6 +1592,25 @@ function Detail({ call, onBack }: { call: Call; onBack: () => void }) {
             <Hairline />
           </>
         )
+      )}
+
+      {linkedInvoices.length > 1 && (
+        <>
+          <section className="px-6 py-6">
+            <p className="smallcaps mb-3" style={{ color: "var(--muted)" }}>
+              {linkedInvoices.length} invoices · {fmtAmount(linkedInvoices[0]?.currency, aggregateTotal)}
+            </p>
+            <div className="flex flex-col gap-2">
+              {linkedInvoices.map((inv) => (
+                <div key={inv.id} className="flex items-center justify-between text-[0.92rem]">
+                  <span>{inv.invoiceNumber ? `#${inv.invoiceNumber}` : "Invoice"}{inv.dueDate ? ` · due ${fmtDate(inv.dueDate)}` : ""}</span>
+                  <span style={{ color: "var(--muted)" }}>{fmtAmount(inv.currency, inv.amountDue)}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+          <Hairline />
+        </>
       )}
 
       <section className="px-6 py-6">
@@ -1919,10 +2002,10 @@ function SelectInvoiceScreen({
       </header>
 
       <div className="px-6 mb-6">
-        <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Invoice dispatch</p>
+        <p className="smallcaps mb-2" style={{ color: "var(--muted)" }}>Invoice scheduling</p>
         <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight">
           Select invoices,<br />
-          <span className="italic" style={{ color: "var(--burgundy)" }}>dispatch Envoy.</span>
+          <span className="italic" style={{ color: "var(--burgundy)" }}>queue for Envoy.</span>
         </h1>
       </div>
 
@@ -2103,7 +2186,7 @@ function SelectInvoiceScreen({
             letterSpacing: "-0.01em",
           }}
         >
-          {dispatching ? "Dispatching…" : `Dispatch Envoy${totalDispatchCount > 0 ? ` (${totalDispatchCount})` : ""}`}
+          {dispatching ? "Queueing…" : `Queue for scheduling${totalDispatchCount > 0 ? ` (${totalDispatchCount})` : ""}`}
         </button>
       </div>
     </div>
@@ -2295,8 +2378,297 @@ function BulkSummaryScreen({
 
 // ─── App ────────────────────────────────────────────────────────────────
 
+// ─── Queue (scheduling) ─────────────────────────────────────────────────
+
+function QueueScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSettings: () => void }) {
+  const [invoices, setInvoices] = useState<QueuedInvoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch("/api/invoices", { cache: "no-store" });
+      if (r.ok) setInvoices((await r.json()).invoices ?? []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const runNow = async () => {
+    setRunning(true);
+    setMsg(null);
+    try {
+      const r = await fetch("/api/scheduler/tick?force=1", { method: "POST" });
+      const data = await r.json();
+      setMsg(
+        data.dispatched > 0
+          ? `Dispatched ${data.dispatched} call${data.dispatched === 1 ? "" : "s"}.`
+          : `No calls dispatched${data.reason ? ` — ${data.reason}` : ""}.`
+      );
+      await load();
+    } catch {
+      setMsg("Run failed.");
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  // Group queued invoices by debtor (groupKey) — mirrors the worker's aggregation.
+  const groups = Object.values(
+    invoices.reduce((acc, inv) => {
+      (acc[inv.groupKey] ??= { key: inv.groupKey, business: inv.contactBusiness, items: [] }).items.push(inv);
+      return acc;
+    }, {} as Record<string, { key: string; business: string; items: QueuedInvoice[] }>)
+  );
+
+  return (
+    <div className="min-h-screen pb-32 fade-in">
+      <header className="px-6 pt-12 pb-5">
+        <div className="flex items-center justify-between mb-8">
+          <button onClick={onBack} className="text-[0.85rem]" style={{ color: "var(--muted)" }}>← Home</button>
+          <button onClick={onOpenSettings} className="text-[0.85rem]" style={{ color: "var(--burgundy)" }}>Settings</button>
+        </div>
+        <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight">
+          Scheduling <span className="italic font-normal" style={{ color: "var(--burgundy)" }}>queue.</span>
+        </h1>
+        <p className="text-[0.9rem] mt-2" style={{ color: "var(--muted)" }}>
+          {groups.length} debtor{groups.length === 1 ? "" : "s"} · {invoices.length} invoice{invoices.length === 1 ? "" : "s"} pending
+        </p>
+      </header>
+      <Hairline />
+
+      {loading && (
+        <div className="px-6 py-16 text-center text-[0.9rem]" style={{ color: "var(--muted)" }}>Loading…</div>
+      )}
+      {!loading && groups.length === 0 && (
+        <div className="px-6 py-16 text-center">
+          <p className="font-display text-[1.15rem] italic mb-2" style={{ color: "var(--muted)" }}>Queue is empty.</p>
+          <p className="text-sm" style={{ color: "var(--muted)" }}>Select invoices from Home to queue them for scheduled chasing.</p>
+        </div>
+      )}
+
+      {groups.map((g) => {
+        const total = g.items.reduce((s, i) => s + (i.amountDue ?? 0), 0);
+        const earliest = g.items.reduce((min, i) => {
+          const d = i.dueDate ?? "9999-12-31";
+          return d < min ? d : min;
+        }, "9999-12-31");
+        const calling = g.items.some((i) => i.status === "calling");
+        return (
+          <div key={g.key} className="px-6 py-5" style={{ borderBottom: "1px solid var(--hairline)" }}>
+            <div className="flex items-start justify-between gap-3 mb-1.5">
+              <h3 className="font-display text-[1.15rem] leading-tight font-medium tracking-tight">{g.business}</h3>
+              <span className="font-display text-[1.1rem] font-medium whitespace-nowrap">{fmtAmount(g.items[0]?.currency, total)}</span>
+            </div>
+            <div className="flex items-center gap-2 mb-2.5">
+              <span className="font-mono text-[0.7rem]" style={{ color: "var(--muted)" }}>
+                {g.items.length} invoice{g.items.length === 1 ? "" : "s"}
+              </span>
+              {earliest !== "9999-12-31" && (
+                <>
+                  <span style={{ color: "var(--hairline-strong)" }}>·</span>
+                  <span className="font-mono text-[0.7rem]" style={{ color: "var(--muted)" }}>earliest due {fmtDate(earliest)}</span>
+                </>
+              )}
+              {calling && (
+                <span className="smallcaps px-2 py-0.5 rounded-sm dot-pulse" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>Calling</span>
+              )}
+            </div>
+            <div className="flex flex-col gap-1">
+              {g.items.map((i) => (
+                <div key={i.id} className="flex items-center justify-between text-[0.85rem]" style={{ color: "var(--muted)" }}>
+                  <span>{i.invoiceNumber ? `#${i.invoiceNumber}` : "Invoice"}{i.dueDate ? ` · due ${fmtDate(i.dueDate)}` : ""}</span>
+                  <span>{fmtAmount(i.currency, i.amountDue)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      <div
+        className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-7 pt-14"
+        style={{ background: "linear-gradient(to top, var(--cream) 60%, transparent)" }}
+      >
+        {msg && <p className="text-center text-[0.82rem] mb-2.5" style={{ color: "var(--muted)" }}>{msg}</p>}
+        <button
+          onClick={runNow}
+          disabled={running}
+          className="w-full py-4 rounded-full font-medium text-[1rem] transition active:scale-[0.98]"
+          style={{ background: "var(--ink)", color: "var(--cream)", letterSpacing: "-0.01em", opacity: running ? 0.6 : 1 }}
+        >
+          {running ? "Running…" : "Run scheduler now"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Settings ───────────────────────────────────────────────────────────
+
+function SettingsScreen({ onBack }: { onBack: () => void }) {
+  const [s, setS] = useState<SchedulerSettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/settings", { cache: "no-store" })
+      .then((r) => r.json())
+      .then(setS)
+      .catch(() => setError("Failed to load settings"));
+  }, []);
+
+  const save = async () => {
+    if (!s) return;
+    setSaving(true);
+    setSaved(false);
+    setError(null);
+    try {
+      const r = await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(s),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
+      setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const DAYS = [
+    { iso: "1", label: "Mon" }, { iso: "2", label: "Tue" }, { iso: "3", label: "Wed" },
+    { iso: "4", label: "Thu" }, { iso: "5", label: "Fri" }, { iso: "6", label: "Sat" }, { iso: "7", label: "Sun" },
+  ];
+  const dayActive = (iso: string) => (s?.bhDays ?? "").split(",").includes(iso);
+  const toggleDay = (iso: string) => {
+    if (!s) return;
+    const set = new Set(s.bhDays.split(",").filter(Boolean));
+    if (set.has(iso)) set.delete(iso); else set.add(iso);
+    const ordered = ["1", "2", "3", "4", "5", "6", "7"].filter((d) => set.has(d));
+    setS({ ...s, bhDays: ordered.join(",") });
+  };
+
+  const field = "w-full px-3 py-2.5 rounded-lg text-[0.95rem] border outline-none";
+  const fieldStyle = { background: "var(--cream-light)", borderColor: "var(--hairline-strong)", color: "var(--ink)" };
+  const labelCls = "smallcaps block mb-1.5";
+
+  return (
+    <div className="min-h-screen pb-32 fade-in">
+      <header className="px-6 pt-12 pb-5">
+        <button onClick={onBack} className="text-[0.85rem] mb-8 block" style={{ color: "var(--muted)" }}>← Back</button>
+        <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight">
+          Scheduler <span className="italic font-normal" style={{ color: "var(--burgundy)" }}>settings.</span>
+        </h1>
+      </header>
+      <Hairline />
+
+      {!s && <div className="px-6 py-16 text-center text-[0.9rem]" style={{ color: "var(--muted)" }}>Loading…</div>}
+
+      {s && (
+        <div className="px-6 py-6 flex flex-col gap-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="smallcaps">Scheduler</span>
+              <p className="text-[0.82rem]" style={{ color: "var(--muted)" }}>Queue is only worked while this is on.</p>
+            </div>
+            <button
+              onClick={() => setS({ ...s, schedulerOn: !s.schedulerOn })}
+              className="px-4 py-2 rounded-full text-[0.82rem] font-medium border"
+              style={s.schedulerOn
+                ? { background: "var(--success-tint)", color: "var(--success)", borderColor: "var(--success)" }
+                : { background: "var(--cream-light)", color: "var(--muted)", borderColor: "var(--hairline-strong)" }}
+            >
+              {s.schedulerOn ? "On" : "Off"}
+            </button>
+          </div>
+
+          <div>
+            <label className={labelCls} style={{ color: "var(--muted)" }}>Business hours (recipient local)</label>
+            <div className="flex items-center gap-3">
+              <input type="number" min={0} max={23} value={s.bhStartHour} onChange={(e) => setS({ ...s, bhStartHour: Number(e.target.value) })} className={field} style={fieldStyle} />
+              <span style={{ color: "var(--muted)" }}>to</span>
+              <input type="number" min={1} max={24} value={s.bhEndHour} onChange={(e) => setS({ ...s, bhEndHour: Number(e.target.value) })} className={field} style={fieldStyle} />
+            </div>
+          </div>
+
+          <div>
+            <label className={labelCls} style={{ color: "var(--muted)" }}>Business days</label>
+            <div className="flex gap-1.5 flex-wrap">
+              {DAYS.map((d) => (
+                <button
+                  key={d.iso}
+                  onClick={() => toggleDay(d.iso)}
+                  className="px-3 py-2 rounded-lg text-[0.82rem] border"
+                  style={dayActive(d.iso)
+                    ? { background: "var(--ink)", color: "var(--cream)", borderColor: "var(--ink)" }
+                    : { background: "var(--cream-light)", color: "var(--muted)", borderColor: "var(--hairline-strong)" }}
+                >
+                  {d.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className={labelCls} style={{ color: "var(--muted)" }}>Timezone (IANA)</label>
+            <input value={s.timezone} onChange={(e) => setS({ ...s, timezone: e.target.value })} className={field} style={fieldStyle} placeholder="Australia/Sydney" />
+          </div>
+
+          <div>
+            <label className={labelCls} style={{ color: "var(--muted)" }}>Chase offset (days after due date)</label>
+            <input type="number" min={-365} max={365} value={s.dueOffsetDays} onChange={(e) => setS({ ...s, dueOffsetDays: Number(e.target.value) })} className={field} style={fieldStyle} />
+            <p className="text-[0.78rem] mt-1" style={{ color: "var(--muted)" }}>0 = chase on the due date. Negative = remind before due.</p>
+          </div>
+
+          <div>
+            <label className={labelCls} style={{ color: "var(--muted)" }}>Call order</label>
+            <div className="flex items-center gap-3">
+              <select value={s.sortField} onChange={(e) => setS({ ...s, sortField: e.target.value as SchedulerSettings["sortField"] })} className={field} style={fieldStyle}>
+                <option value="overdue">Most overdue</option>
+                <option value="amount">Amount owed</option>
+              </select>
+              <select value={s.sortDir} onChange={(e) => setS({ ...s, sortDir: e.target.value as SchedulerSettings["sortDir"] })} className={field} style={fieldStyle}>
+                <option value="asc">{s.sortField === "amount" ? "Smallest first" : "Oldest first"}</option>
+                <option value="desc">{s.sortField === "amount" ? "Largest first" : "Newest first"}</option>
+              </select>
+            </div>
+          </div>
+
+          {error && <p className="text-[0.85rem]" style={{ color: "var(--burgundy)" }}>{error}</p>}
+        </div>
+      )}
+
+      {s && (
+        <div
+          className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-7 pt-14"
+          style={{ background: "linear-gradient(to top, var(--cream) 60%, transparent)" }}
+        >
+          <button
+            onClick={save}
+            disabled={saving}
+            className="w-full py-4 rounded-full font-medium text-[1rem] transition active:scale-[0.98]"
+            style={{ background: "var(--ink)", color: "var(--cream)", letterSpacing: "-0.01em", opacity: saving ? 0.6 : 1 }}
+          >
+            {saving ? "Saving…" : saved ? "Saved ✓" : "Save settings"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function EnvoyApp() {
-  const [screen, setScreen] = useState<"home" | "compose" | "invoice-compose" | "bulk-invoice" | "select-invoice" | "bulk-summary" | "live" | "detail">("home");
+  const [screen, setScreen] = useState<"home" | "compose" | "invoice-compose" | "bulk-invoice" | "select-invoice" | "bulk-summary" | "live" | "detail" | "queue" | "settings">("home");
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeCallId, setActiveCallId] = useState<string | null>(null);
@@ -2697,10 +3069,32 @@ export default function EnvoyApp() {
     }
   };
 
-  // Parse → resolve phone → dispatch for each item as soon as it's ready.
-  // Contacts are pre-loaded once so each item can dispatch immediately after parsing
+  // Queue a parsed item for scheduled chasing (POST /api/invoices) instead of
+  // dialing immediately. Used by the default "Select invoice" flow.
+  const queueBulkItem = async (uid: string): Promise<void> => {
+    const item = bulkItemsRef.current.find((i) => i.uid === uid);
+    if (!item?.parsed || !hasCallableNumber(item.parsed.toNumber)) return;
+    setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "queueing" } : i));
+    try {
+      const r = await fetch("/api/invoices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildBulkBrief(item.parsed)),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.error ?? `HTTP ${r.status}`);
+      }
+      setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "queued" } : i));
+    } catch (err) {
+      setBulkItems((prev) => prev.map((i) => i.uid === uid ? { ...i, status: "dispatch-error", error: err instanceof Error ? err.message : "Queue failed" } : i));
+    }
+  };
+
+  // Parse → resolve phone → dispatch (or queue) for each item as soon as it's ready.
+  // Contacts are pre-loaded once so each item can proceed immediately after parsing
   // without waiting for all other items to finish.
-  const runInvoicePipeline = async (uids: string[]) => {
+  const runInvoicePipeline = async (uids: string[], mode: "dispatch" | "queue" = "dispatch") => {
     const uidSet = new Set(uids);
     const targets = bulkItemsRef.current.filter((i) => uidSet.has(i.uid));
 
@@ -2758,6 +3152,13 @@ export default function EnvoyApp() {
         bulkItemsRef.current = bulkItemsRef.current.map((i) => i.uid === item.uid ? resolved : i);
         setBulkItems((prev) => prev.map((i) => i.uid === item.uid ? resolved : i));
 
+        // Queue mode: just add to the scheduling queue and move on (no dialing).
+        if (mode === "queue") {
+          if (bulkItemsRef.current.find((i) => i.uid === item.uid)?.status === "paused") return;
+          await queueBulkItem(item.uid);
+          return;
+        }
+
         // Dispatch immediately with backpressure retry.
         const CAPACITY_WAIT = 10_000;
         while (true) {
@@ -2813,10 +3214,11 @@ export default function EnvoyApp() {
       setBulkItems(bulkItemsRef.current);
     }
     if (bulkItemsRef.current.length === 0) return;
-    setScreen("bulk-summary");
     setIsDispatching(true);
     try {
-      await runInvoicePipeline(bulkItemsRef.current.map((i) => i.uid));
+      // Parse + add to the scheduling queue; the worker dials within business hours.
+      await runInvoicePipeline(bulkItemsRef.current.map((i) => i.uid), "queue");
+      setScreen("queue");
     } finally {
       setIsDispatching(false);
     }
@@ -2873,6 +3275,7 @@ export default function EnvoyApp() {
           onUploadInvoice={() => { setBulkItems([]); setScreen("select-invoice"); loadDriveFiles(); }}
           onSelectCall={(id) => { setActiveCallId(id); setReturnToBulk(false); setReturnToSummary(false); setScreen("detail"); }}
           onRefresh={fetchCalls}
+          onOpenQueue={() => setScreen("queue")}
         />
       )}
       {screen === "compose" && (
@@ -2907,6 +3310,15 @@ export default function EnvoyApp() {
           }}
           onBack={() => setScreen("home")}
         />
+      )}
+      {screen === "queue" && (
+        <QueueScreen
+          onBack={() => { fetchCalls(); setScreen("home"); }}
+          onOpenSettings={() => setScreen("settings")}
+        />
+      )}
+      {screen === "settings" && (
+        <SettingsScreen onBack={() => setScreen("queue")} />
       )}
       {screen === "live" && activeCallId && (
         <Live
