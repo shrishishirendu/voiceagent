@@ -11,4 +11,6 @@ prisma/envoy.db*
 .DS_Store
 *.log
 CLAUDE.md
+tsconfig.tsbuildinfo
+.playwright-mcp/
 
