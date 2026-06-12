@@ -33,7 +33,7 @@ type Manner = "warm" | "crisp" | "formal";
 export function normalizeBusinessName(name: string): string {
   return (name ?? "")
     .toLowerCase()
-    .replace(/\b(pty|ltd|limited|inc|incorporated|llc|co|company|corp|corporation|group|holdings|international|the)\b/g, "")
+    .replace(/\b(pty|ltd|limited|inc|incorporated|llc|co|company|corp|corporation|group|holdings|international|the|software|solutions|technologies|tech|systems|services|management|consulting|enterprises|enterprise|digital|innovations|innovation|partners|ventures|associates|global|properties|property|and)\b/g, "")
     .replace(/[^a-z0-9]/g, "")
     .trim();
 }
@@ -88,13 +88,38 @@ export function isWithinBusinessHours(now: Date, s: Settings): boolean {
 // --- Concurrency gate (mirror of dispatch route L107-131) ----------------
 
 async function reapStaleCalls(): Promise<void> {
+  const staleThreshold = new Date(Date.now() - STALE_MS);
+  const staleCalls = await prisma.call.findMany({
+    where: { status: { in: ACTIVE_STATUSES }, createdAt: { lte: staleThreshold } },
+    select: { id: true },
+  });
+  if (staleCalls.length === 0) return;
+  const staleIds = staleCalls.map((c) => c.id);
+
   await prisma.call.updateMany({
-    where: {
-      status: { in: ACTIVE_STATUSES },
-      createdAt: { lte: new Date(Date.now() - STALE_MS) },
-    },
+    where: { id: { in: staleIds } },
     data: { status: "failed", endedReason: "abandoned-no-response", outcome: "failed" },
   });
+
+  // Also requeue (or permanently fail) any invoices stuck at "calling" for reaped calls.
+  const settings = await getSettings();
+  const linked = await prisma.invoice.findMany({
+    where: { callId: { in: staleIds }, status: "calling" },
+  });
+  for (const inv of linked) {
+    if (!settings.autoRetry || inv.attempts >= MAX_INVOICE_ATTEMPTS) {
+      await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed", callId: null } });
+    } else {
+      await prisma.invoice.update({
+        where: { id: inv.id },
+        data: {
+          status: "pending",
+          callId: null,
+          chaseAfter: new Date(Date.now() + (settings.retryDelayHours ?? 24) * 60 * 60 * 1000),
+        },
+      });
+    }
+  }
 }
 
 export async function freeCallSlots(): Promise<number> {
@@ -189,6 +214,28 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
     invoiceNotes: i.invoiceNotes ?? undefined,
   }));
 
+  // Also include same-debtor pending invoices not yet eligible (future chaseAfter)
+  // so the agent knows about the full picture. They stay pending — not marked calling.
+  const extraInvoices = await prisma.invoice.findMany({
+    where: {
+      groupKey: lead.groupKey,
+      status: "pending",
+      id: { notIn: invoices.map((i) => i.id) },
+    },
+  });
+  const allInvoiceBlocks: InvoiceBlock[] = [
+    ...invoiceBlocks,
+    ...extraInvoices.map((i) => ({
+      invoiceNumber: i.invoiceNumber ?? undefined,
+      invoiceDate: i.invoiceDate ?? undefined,
+      dueDate: i.dueDate ?? undefined,
+      amountDue: i.amountDue ?? undefined,
+      currency: i.currency ?? undefined,
+      lineItems: i.lineItems ?? undefined,
+      invoiceNotes: i.invoiceNotes ?? undefined,
+    })),
+  ];
+
   const totalAmount = sorted.reduce((sum, i) => sum + (i.amountDue ?? 0), 0);
   const voicemailScript = buildVoicemailMessage({
     contactBusiness: lead.contactBusiness,
@@ -212,6 +259,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
       objective: lead.objective,
       voice: lead.voice,
       manner: lead.manner,
+      userName: lead.userName,
       invoiceNumber: lead.invoiceNumber,
       invoiceDate: lead.invoiceDate,
       dueDate: lead.dueDate,
@@ -239,6 +287,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
   });
 
   // 3. Dispatch via Vapi.
+  console.log(`[dispatcher] dialing ${lead.contactBusiness} → ${toNumber} (call ${call.id})`);
   try {
     const vapiCall = await dispatchVapiCall({
       toNumber,
@@ -248,7 +297,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
       voice,
       manner,
       userName: lead.userName,
-      invoices: invoiceBlocks,
+      invoices: allInvoiceBlocks,
       bankName: lead.bankName ?? undefined,
       bsb: lead.bsb ?? undefined,
       accountNumber: lead.accountNumber ?? undefined,

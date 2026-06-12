@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { listDriveInvoices } from "@/lib/drive";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 30;
 
 function missingEnv(): string | null {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY) return "GOOGLE_SERVICE_ACCOUNT_KEY";

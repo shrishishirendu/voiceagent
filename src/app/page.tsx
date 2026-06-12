@@ -71,12 +71,29 @@ interface QueuedInvoice {
   abn: string | null;
   groupKey: string;
   invoiceNumber: string | null;
+  invoiceDate: string | null;
   dueDate: string | null;
   amountDue: number | null;
   currency: string | null;
   status: string;
+  attempts: number;
   chaseAfter: string;
   toNumber: string | null;
+  call: { id: string; status: string; outcome: string | null } | null;
+  // editable fields for InvoiceCompose pre-fill
+  contactPerson: string | null;
+  userName: string;
+  lineItems: string | null;
+  invoiceNotes: string | null;
+  bankName: string | null;
+  bsb: string | null;
+  accountNumber: string | null;
+  swiftCode: string | null;
+  remittanceName: string | null;
+  remittanceContact: string | null;
+  voice: string;
+  manner: string;
+  objective: string;
 }
 
 interface SchedulerSettings {
@@ -88,6 +105,9 @@ interface SchedulerSettings {
   sortField: "overdue" | "amount";
   sortDir: "asc" | "desc";
   schedulerOn: boolean;
+  smsEnabled: boolean;
+  retryDelayHours: number;
+  autoRetry: boolean;
 }
 
 interface InvoiceParseResult {
@@ -316,22 +336,52 @@ const WaveAnim = ({ active }: { active: boolean }) => (
 function Home({
   calls,
   loading,
+  bulkItems,
   onNewCall,
   onUploadInvoice,
   onSelectCall,
   onRefresh,
   onOpenQueue,
+  onOpenSettings,
+  onViewBulkDetail,
+  onBulkItemDetails,
+  onRetryFailed,
 }: {
   calls: Call[];
   loading: boolean;
+  bulkItems: BulkItem[];
   onNewCall: () => void;
   onUploadInvoice: () => void;
   onSelectCall: (id: string) => void;
   onRefresh: () => void;
   onOpenQueue: () => void;
+  onOpenSettings: () => void;
+  onViewBulkDetail: (callId: string) => void;
+  onBulkItemDetails: (uid: string) => void;
+  onRetryFailed: () => void;
 }) {
-  const resolved = calls.filter((c) => c.outcome === "success").length;
-  const failed = calls.filter((c) => c.outcome === "failed").length;
+  const visibleCalls = calls.filter(c => ["ringing", "in-progress", "completed", "failed"].includes(c.status));
+  const resolved = visibleCalls.filter((c) => c.outcome === "success").length;
+  const failed = visibleCalls.filter((c) => c.outcome === "failed").length;
+  const noAnswer = visibleCalls.filter((c) => c.outcome === "no-answer").length;
+
+  // Queued-mode items belong on the Queue screen; parse-error items show as a banner there too.
+  // Only show batch items that resulted in actual call-mode dispatch on the home screen.
+  const homeBatchItems = bulkItems.filter(
+    (i) => i.status !== "queued" && i.status !== "queueing" && i.status !== "parse-error"
+  );
+
+  const bulkAnsweredCount = homeBatchItems.filter((i) => i.callOutcome === "success" || i.callOutcome === "partial").length;
+  const bulkNoAnswerCount = homeBatchItems.filter((i) => i.callOutcome === "no-answer").length;
+  const bulkErrorCount = homeBatchItems.filter((i) => i.callOutcome === "failed" || i.status === "dispatch-error").length;
+  const bulkInProgressCount = homeBatchItems.filter((i) => {
+    if (i.callStatus === "completed" || i.callStatus === "failed") return false;
+    if (i.status === "dispatch-error") return false;
+    return true;
+  }).length;
+  const bulkFailedCount = homeBatchItems.filter(isFailedItem).length;
+  const bulkPausedCount = homeBatchItems.filter((i) => i.status === "paused").length;
+  const showBulkRetry = bulkFailedCount + bulkPausedCount > 0;
 
   return (
     <div className="min-h-screen pb-32 fade-in">
@@ -356,21 +406,32 @@ function Home({
                 <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
               </svg>
             </button>
+            <button
+              onClick={onOpenSettings}
+              className="w-9 h-9 rounded-full flex items-center justify-center border"
+              style={{ background: "var(--cream-light)", borderColor: "var(--hairline)" }}
+              title="Settings"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--ink)" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
           </div>
         </div>
 
         <h1 className="font-display text-[2.6rem] leading-[1.05] font-light tracking-tight">
-          {calls.length === 0 ? (
+          {visibleCalls.length === 0 ? (
             <>Place your<br/><span className="italic font-normal" style={{ color: "var(--burgundy)" }}>first call.</span></>
           ) : (
-            <>{calls.length} {calls.length === 1 ? "call" : "calls"}<br/><span className="italic font-normal" style={{ color: "var(--burgundy)" }}>so far.</span></>
+            <>{visibleCalls.length} {visibleCalls.length === 1 ? "call" : "calls"}<br/><span className="italic font-normal" style={{ color: "var(--burgundy)" }}>so far.</span></>
           )}
         </h1>
       </header>
 
       <Hairline />
 
-      <div className="grid grid-cols-2 px-6 py-3" style={{ borderBottom: "1px solid var(--hairline)" }}>
+      <div className="grid grid-cols-3 px-6 py-3" style={{ borderBottom: "1px solid var(--hairline)" }}>
         <div>
           <div className="font-display text-[1.75rem] leading-none font-medium">{resolved}</div>
           <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>Resolved</div>
@@ -379,9 +440,117 @@ function Home({
           <div className="font-display text-[1.75rem] leading-none font-medium">{failed}</div>
           <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>Failed</div>
         </div>
+        <div className="border-l pl-4" style={{ borderColor: "var(--hairline)" }}>
+          <div className="font-display text-[1.75rem] leading-none font-medium">{noAnswer}</div>
+          <div className="smallcaps mt-1.5" style={{ color: "var(--muted)" }}>No Answer</div>
+        </div>
       </div>
 
-      {calls.length === 0 && !loading && (
+      {/* Live batch section — only shows call-mode items; queued/parse-error items live on the Queue screen */}
+      {homeBatchItems.length > 0 && (
+        <div className="px-4 pt-4 pb-2">
+          <div className="flex items-center gap-2 flex-wrap px-2 mb-3">
+            <p className="smallcaps" style={{ color: "var(--muted)" }}>Recent batch</p>
+            {bulkAnsweredCount > 0 && (
+              <div className="flex items-center gap-1 px-2.5 py-1 rounded-full" style={{ background: "var(--success-tint, #e8f5e9)", color: "var(--success, #2e7d32)" }}>
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                <span className="text-[0.72rem] font-medium">{bulkAnsweredCount} answered</span>
+              </div>
+            )}
+            {bulkNoAnswerCount > 0 && (
+              <div className="flex items-center gap-1 px-2.5 py-1 rounded-full" style={{ background: "var(--cream-dark)", color: "var(--muted)" }}>
+                <span className="text-[0.72rem] font-medium">{bulkNoAnswerCount} no answer</span>
+              </div>
+            )}
+            {bulkErrorCount > 0 && (
+              <div className="flex items-center gap-1 px-2.5 py-1 rounded-full" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>
+                <span className="text-[0.72rem] font-medium">{bulkErrorCount} failed</span>
+              </div>
+            )}
+            {bulkInProgressCount > 0 && (
+              <div className="flex items-center gap-1 px-2.5 py-1 rounded-full dot-pulse" style={{ background: "var(--cream-dark)", color: "var(--muted)" }}>
+                <span className="text-[0.72rem] font-medium">{bulkInProgressCount} in progress</span>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            {homeBatchItems.map((item) => {
+              const badge = getSummaryBadge(item);
+              const isSettled = item.callStatus === "completed" || item.callStatus === "failed";
+              const canEdit = item.status === "parsing" || item.status === "parsed" || item.status === "paused" || item.status === "dispatch-error";
+              const title = item.parsed?.contactBusiness || item.fileName;
+              const subtitle = [
+                fmtAmount(item.parsed?.currency, item.parsed?.amountDue) || null,
+                item.parsed?.dueDate ? `due ${fmtDate(item.parsed.dueDate)}` : null,
+              ].filter(Boolean).join(" · ");
+
+              return (
+                <button
+                  key={item.uid}
+                  onClick={isSettled && item.callId ? () => onViewBulkDetail(item.callId!) : undefined}
+                  className="w-full text-left px-4 py-4 rounded-md border flex items-center gap-3 transition"
+                  style={{
+                    background: "var(--cream-light)",
+                    borderColor: isSettled ? "var(--hairline-strong)" : "var(--hairline)",
+                    cursor: isSettled && item.callId ? "pointer" : "default",
+                  }}
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[0.92rem] font-medium truncate" style={{ color: "var(--ink)" }}>{title}</p>
+                    {subtitle && (
+                      <p className="text-[0.77rem] mt-0.5 truncate" style={{ color: "var(--muted)" }}>{subtitle}</p>
+                    )}
+                    {item.error && (
+                      <p className="text-[0.75rem] mt-0.5" style={{ color: "var(--burgundy)" }}>{item.error}</p>
+                    )}
+                    {isSettled && item.callId && (
+                      <p className="text-[0.72rem] mt-1.5" style={{ color: "var(--muted-light)" }}>Tap to view transcript →</p>
+                    )}
+                  </div>
+                  {canEdit && (
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label="Edit details"
+                      onClick={(e) => { e.stopPropagation(); onBulkItemDetails(item.uid); }}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); onBulkItemDetails(item.uid); } }}
+                      className="shrink-0 flex items-center justify-center w-8 h-8 rounded-full transition active:scale-95"
+                      style={{ color: "var(--muted)", background: "var(--cream-dark)", cursor: "pointer" }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      </svg>
+                    </span>
+                  )}
+                  <span
+                    className={`text-[0.78rem] font-medium px-2.5 py-1 rounded-full shrink-0 ${badge.pulsing ? "dot-pulse" : ""}`}
+                    style={{ background: badge.bg, color: badge.fg }}
+                  >
+                    {badge.label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {showBulkRetry && (
+            <button
+              onClick={onRetryFailed}
+              className="w-full mt-3 py-3 rounded-full font-medium text-[0.92rem] transition active:scale-[0.98]"
+              style={{ background: "var(--burgundy)", color: "var(--cream)" }}
+            >
+              Retry all ({bulkFailedCount + bulkPausedCount})
+            </button>
+          )}
+        </div>
+      )}
+
+      {bulkItems.length > 0 && visibleCalls.length > 0 && <Hairline />}
+
+      {/* Call history cards */}
+      {visibleCalls.length === 0 && !loading && bulkItems.length === 0 && (
         <div className="px-6 py-20 text-center">
           <p className="font-display text-[1.2rem] italic mb-3" style={{ color: "var(--muted)" }}>
             Nothing here yet.
@@ -392,56 +561,57 @@ function Home({
         </div>
       )}
 
-      <div>
-        {calls.map((call, i) => {
-          const oc = outcomeStyle(call.outcome);
-          const active = call.status !== "completed" && call.status !== "failed";
-          return (
-            <button
-              key={call.id}
-              onClick={() => onSelectCall(call.id)}
-              className="w-full text-left px-6 py-5 transition fade-up"
-              style={{
-                borderBottom: "1px solid var(--hairline)",
-                animationDelay: `${i * 60}ms`,
-              }}
-            >
-              <div className="flex items-start justify-between gap-3 mb-2">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-mono text-[0.7rem]" style={{ color: "var(--muted)" }}>
-                      {fmtWhen(call.createdAt)}
-                    </span>
-                    <span style={{ color: "var(--hairline-strong)" }}>·</span>
-                    <span className="font-mono text-[0.7rem]" style={{ color: "var(--muted)" }}>
-                      {fmtDuration(call.durationSec)}
-                    </span>
-                  </div>
-                  <h3 className="font-display text-[1.2rem] leading-tight font-medium tracking-tight">
-                    {call.contactBusiness}
-                  </h3>
-                </div>
-                {active ? (
-                  <span className="smallcaps px-2 py-1 rounded-sm dot-pulse" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>
-                    {statusLabel(call.status)}
-                  </span>
-                ) : (
-                  <span className="smallcaps px-2 py-1 rounded-sm whitespace-nowrap" style={{ background: oc.bg, color: oc.fg }}>
-                    {oc.label}
-                  </span>
-                )}
-              </div>
-              <p className="text-[0.92rem] leading-snug" style={{ color: "var(--muted)" }}>
-                {call.result ?? call.objective}
-              </p>
-            </button>
-          );
-        })}
-      </div>
+      {visibleCalls.length > 0 && (
+        <div className="px-4 pt-3 flex flex-col gap-2">
+          {visibleCalls.map((call) => {
+            const badge = getCallBadge(call);
+            const isActive = call.status !== "completed" && call.status !== "failed";
+            const isSettled = !isActive;
+            const subtitle = [
+              fmtAmount(call.currency, call.amountDue) || null,
+              call.invoices && call.invoices.length > 1
+                ? `${call.invoices.length} invoices`
+                : null,
+            ].filter(Boolean).join(" · ");
 
-      <div className="px-6 py-8 text-center">
-        <p className="smallcaps" style={{ color: "var(--muted-light)" }}>End of history</p>
-      </div>
+            return (
+              <button
+                key={call.id}
+                onClick={() => onSelectCall(call.id)}
+                className="w-full text-left px-4 py-4 rounded-md border flex items-center gap-3 transition"
+                style={{
+                  background: "var(--cream-light)",
+                  borderColor: isActive ? "var(--hairline)" : "var(--hairline-strong)",
+                }}
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="text-[0.72rem] font-mono mb-0.5" style={{ color: "var(--muted)" }}>
+                    {fmtWhen(call.createdAt)}{call.durationSec != null ? ` · ${fmtDuration(call.durationSec)}` : ""}
+                  </p>
+                  <p className="text-[0.92rem] font-medium truncate" style={{ color: "var(--ink)" }}>
+                    {call.contactBusiness}
+                  </p>
+                  {subtitle && (
+                    <p className="text-[0.77rem] mt-0.5 truncate" style={{ color: "var(--muted)" }}>{subtitle}</p>
+                  )}
+                  {isSettled && (
+                    <p className="text-[0.72rem] mt-1.5" style={{ color: "var(--muted-light)" }}>Tap to view transcript →</p>
+                  )}
+                </div>
+                <span
+                  className={`text-[0.78rem] font-medium px-2.5 py-1 rounded-full shrink-0 ${badge.pulsing ? "dot-pulse" : ""}`}
+                  style={{ background: badge.bg, color: badge.fg }}
+                >
+                  {badge.label}
+                </span>
+              </button>
+            );
+          })}
+          <div className="py-6 text-center">
+            <p className="smallcaps" style={{ color: "var(--muted-light)" }}>End of history</p>
+          </div>
+        </div>
+      )}
 
       <div
         className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-7 pt-14"
@@ -2201,6 +2371,32 @@ const isInProgressItem = (i: BulkItem) =>
   i.status === "parsing" || i.status === "dispatching" ||
   i.callStatus === "queued" || i.callStatus === "ringing" || i.callStatus === "in-progress";
 
+function getSummaryBadge(item: BulkItem) {
+  if (item.callStatus === "completed" || item.callStatus === "failed") {
+    const oc = outcomeStyle(item.callOutcome ?? null);
+    return { label: oc.label, bg: oc.bg, fg: oc.fg, pulsing: false };
+  }
+  if (item.callStatus === "in-progress") return { label: "In conversation", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
+  if (item.callStatus === "ringing") return { label: "Ringing", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
+  if (item.callStatus === "queued") return { label: "Connecting", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
+  if (item.status === "dispatched") return { label: "Dispatched", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
+  if (item.status === "dispatching") return { label: "Dispatching…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
+  if (item.status === "queueing") return { label: "Queueing…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
+  if (item.status === "queued") return { label: "Queued", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
+  if (item.status === "dispatch-error") return { label: "Failed", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: false };
+  if (item.status === "parse-error") return { label: "Parse error", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
+  if (item.status === "paused") return { label: "Paused", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
+  if (item.status === "parsed") return { label: "Ready", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
+  return { label: "Reading…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
+}
+
+function getCallBadge(call: Call) {
+  const active = call.status !== "completed" && call.status !== "failed";
+  if (active) return { label: statusLabel(call.status), bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
+  const oc = outcomeStyle(call.outcome);
+  return { label: oc.label, bg: oc.bg, fg: oc.fg, pulsing: false };
+}
+
 function BulkSummaryScreen({
   items,
   onViewDetail,
@@ -2230,27 +2426,6 @@ function BulkSummaryScreen({
     if (i.status === "parse-error" || i.status === "dispatch-error") return false;
     return true;
   }).length;
-
-  const getSummaryBadge = (item: BulkItem) => {
-    // Terminal: show outcome
-    if (item.callStatus === "completed" || item.callStatus === "failed") {
-      const oc = outcomeStyle(item.callOutcome ?? null);
-      return { label: oc.label, bg: oc.bg, fg: oc.fg, pulsing: false };
-    }
-    // Active call states
-    if (item.callStatus === "in-progress") return { label: "In conversation", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
-    if (item.callStatus === "ringing") return { label: "Ringing", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
-    if (item.callStatus === "queued") return { label: "Connecting", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: true };
-    // Dispatch states
-    if (item.status === "dispatched") return { label: "Dispatched", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
-    if (item.status === "dispatching") return { label: "Dispatching…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
-    if (item.status === "dispatch-error") return { label: "Failed", bg: "var(--burgundy-tint)", fg: "var(--burgundy)", pulsing: false };
-    if (item.status === "parse-error") return { label: "Parse error", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
-    if (item.status === "paused") return { label: "Paused", bg: "var(--warning-tint)", fg: "var(--warning)", pulsing: false };
-    if (item.status === "parsed") return { label: "Ready", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: false };
-    // Default: parsing
-    return { label: "Reading…", bg: "var(--cream-dark)", fg: "var(--muted)", pulsing: true };
-  };
 
   return (
     <div className="min-h-screen pb-32 fade-in">
@@ -2380,37 +2555,93 @@ function BulkSummaryScreen({
 
 // ─── Queue (scheduling) ─────────────────────────────────────────────────
 
-function QueueScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSettings: () => void }) {
+function QueueScreen({
+  onBack,
+  onOpenSettings,
+  onEditInvoice,
+  onViewTranscript,
+  reloadKey,
+  parseFailures,
+  onRetryParse,
+}: {
+  onBack: () => void;
+  onOpenSettings: () => void;
+  onEditInvoice: (inv: QueuedInvoice) => void;
+  onViewTranscript: (callId: string) => void;
+  reloadKey: number;
+  parseFailures: BulkItem[];
+  onRetryParse: (uid: string) => void;
+}) {
   const [invoices, setInvoices] = useState<QueuedInvoice[]>([]);
+  const [queueSettings, setQueueSettings] = useState<{ sortField: string; sortDir: string } | null>(null);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [dispatchingKey, setDispatchingKey] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [clearing, setClearing] = useState(false);
+  const [retrying, setRetrying] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
-      const r = await fetch("/api/invoices", { cache: "no-store" });
-      if (r.ok) setInvoices((await r.json()).invoices ?? []);
+      const [invRes, stRes] = await Promise.all([
+        fetch("/api/invoices", { cache: "no-store" }),
+        fetch("/api/settings", { cache: "no-store" }),
+      ]);
+      if (invRes.ok) setInvoices((await invRes.json()).invoices ?? []);
+      if (stRes.ok) setQueueSettings(await stRes.json());
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
   }, []);
-  useEffect(() => { load(); }, [load]);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }, []);
+
+  const startPolling = useCallback(() => {
+    stopPolling();
+    load();
+    pollRef.current = setInterval(load, 2000);
+  }, [load, stopPolling]);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(() => { load(); }, [load, reloadKey]);
+
+  // Auto-stop polling once all active calls reach a terminal state.
+  useEffect(() => {
+    const anyActive = invoices.some(
+      (i) => (i.call && i.call.status !== "completed" && i.call.status !== "failed") || i.status === "calling"
+    );
+    if (!anyActive && pollRef.current) stopPolling();
+  }, [invoices, stopPolling]);
+
+  // Start polling on mount if a call is already in flight (re-enter mid-call).
+  useEffect(() => {
+    const anyActive = invoices.some(
+      (i) => (i.call && i.call.status !== "completed" && i.call.status !== "failed") || i.status === "calling"
+    );
+    if (anyActive && !pollRef.current) startPolling();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const runNow = async () => {
     setRunning(true);
     setMsg(null);
     try {
-      const r = await fetch("/api/scheduler/tick?force=1", { method: "POST" });
-      const data = await r.json();
-      setMsg(
-        data.dispatched > 0
-          ? `Dispatched ${data.dispatched} call${data.dispatched === 1 ? "" : "s"}.`
-          : `No calls dispatched${data.reason ? ` — ${data.reason}` : ""}.`
-      );
-      await load();
+      const res = await fetch("/api/scheduler/tick?force=1", { method: "POST" });
+      const data = await res.json();
+      const lines: string[] = [];
+      if (data.dispatched > 0) lines.push(`Dispatched ${data.dispatched} call${data.dispatched === 1 ? "" : "s"}.`);
+      if (data.errors?.length) lines.push(`Errors: ${data.errors[0]}`);
+      if (lines.length === 0) {
+        lines.push(data.reason ? `No calls dispatched — ${data.reason}.` : "No calls dispatched.");
+      }
+      setMsg(lines.join(" "));
+      startPolling();
     } catch {
       setMsg("Run failed.");
     } finally {
@@ -2418,12 +2649,111 @@ function QueueScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSet
     }
   };
 
-  // Group queued invoices by debtor (groupKey) — mirrors the worker's aggregation.
-  const groups = Object.values(
-    invoices.reduce((acc, inv) => {
-      (acc[inv.groupKey] ??= { key: inv.groupKey, business: inv.contactBusiness, items: [] }).items.push(inv);
-      return acc;
-    }, {} as Record<string, { key: string; business: string; items: QueuedInvoice[] }>)
+  const dispatchGroup = async (groupKey: string) => {
+    setDispatchingKey(groupKey);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/invoices/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ groupKey }),
+      });
+      const data = await res.json();
+      if (data.errors?.length) setMsg(data.errors[0]);
+      else if (data.reason) setMsg(data.reason);
+      startPolling();
+    } catch {
+      setMsg("Dispatch failed.");
+    } finally {
+      setDispatchingKey(null);
+    }
+  };
+
+  const removeInvoice = async (id: string) => {
+    setRemoving(id);
+    try {
+      await fetch(`/api/invoices/${id}`, { method: "DELETE" });
+      await load();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRemoving(null);
+    }
+  };
+
+  const clearQueue = async () => {
+    setClearing(true);
+    try {
+      await fetch("/api/invoices", { method: "DELETE" });
+      await load();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const retryInvoice = async (id: string) => {
+    setRetrying(id);
+    try {
+      await fetch(`/api/invoices/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "pending", chaseAfter: new Date().toISOString() }),
+      });
+      await load();
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRetrying(null);
+    }
+  };
+
+  // Active invoices awaiting dispatch; failed-today invoices shown separately.
+  const allInvoices = invoices;
+  const queueInvoices = allInvoices.filter((i) => ["pending", "queued", "calling"].includes(i.status));
+  const failedInvoices = allInvoices.filter((i) => i.status === "failed");
+
+  // Group pending/calling invoices by debtor using fuzzy name matching so that
+  // invoices for the same company with slightly different name variants (e.g. "iSoft"
+  // vs "Isoft Software") are collapsed into one group even if their stored groupKeys differ.
+  const groups: { key: string; business: string; items: QueuedInvoice[] }[] = [];
+  for (const inv of queueInvoices) {
+    const existing = groups.find((g) => companyNamesMatch(g.business, inv.contactBusiness));
+    if (existing) {
+      existing.items.push(inv);
+    } else {
+      groups.push({ key: inv.groupKey, business: inv.contactBusiness, items: [inv] });
+    }
+  }
+  // Sort groups by the configured call order from settings.
+  const sortDir = queueSettings?.sortDir === "desc" ? -1 : 1;
+  groups.sort((a, b) => {
+    if (queueSettings?.sortField === "amount") {
+      const tA = a.items.reduce((s, i) => s + (i.amountDue ?? 0), 0);
+      const tB = b.items.reduce((s, i) => s + (i.amountDue ?? 0), 0);
+      return (tA - tB) * sortDir;
+    }
+    // Default: sort by earliest due date in the group (most overdue first when asc).
+    const minA = a.items.reduce((m, i) => i.dueDate && (!m || i.dueDate < m) ? i.dueDate : m, "");
+    const minB = b.items.reduce((m, i) => i.dueDate && (!m || i.dueDate < m) ? i.dueDate : m, "");
+    return (minA || "9999-12-31").localeCompare(minB || "9999-12-31") * sortDir;
+  });
+
+  const now = new Date();
+
+  const eligibleGroupCount = groups.filter((g) =>
+    g.items.every((i) => i.toNumber) &&
+    g.items.some((i) => i.status === "pending" && new Date(i.chaseAfter) <= now)
+  ).length;
+
+  const pendingCount = queueInvoices.length;
+
+  const PencilIcon = () => (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+    </svg>
   );
 
   return (
@@ -2431,21 +2761,55 @@ function QueueScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSet
       <header className="px-6 pt-12 pb-5">
         <div className="flex items-center justify-between mb-8">
           <button onClick={onBack} className="text-[0.85rem]" style={{ color: "var(--muted)" }}>← Home</button>
-          <button onClick={onOpenSettings} className="text-[0.85rem]" style={{ color: "var(--burgundy)" }}>Settings</button>
+          <div className="flex items-center gap-3">
+            {groups.length > 0 && (
+              <button
+                onClick={clearQueue}
+                disabled={clearing}
+                className="text-[0.82rem]"
+                style={{ color: "var(--burgundy)", opacity: clearing ? 0.5 : 1 }}
+              >
+                {clearing ? "Clearing…" : "Clear queue"}
+              </button>
+            )}
+            <button onClick={onOpenSettings} className="text-[0.85rem]" style={{ color: "var(--muted)" }}>Settings</button>
+          </div>
         </div>
         <h1 className="font-display text-[2.2rem] leading-[1.05] font-light tracking-tight">
           Scheduling <span className="italic font-normal" style={{ color: "var(--burgundy)" }}>queue.</span>
         </h1>
         <p className="text-[0.9rem] mt-2" style={{ color: "var(--muted)" }}>
-          {groups.length} debtor{groups.length === 1 ? "" : "s"} · {invoices.length} invoice{invoices.length === 1 ? "" : "s"} pending
+          {groups.length} debtor{groups.length === 1 ? "" : "s"} · {pendingCount} invoice{pendingCount === 1 ? "" : "s"} pending
         </p>
       </header>
       <Hairline />
 
+      {parseFailures.length > 0 && (
+        <div className="px-6 py-3" style={{ background: "var(--burgundy-tint)", borderBottom: "1px solid var(--hairline)" }}>
+          <p className="text-[0.82rem] font-medium mb-1.5" style={{ color: "var(--burgundy)" }}>
+            {parseFailures.length} file{parseFailures.length === 1 ? "" : "s"} failed to parse — review before dispatching
+          </p>
+          <div className="flex flex-col gap-1">
+            {parseFailures.map((f) => (
+              <div key={f.uid} className="flex items-center justify-between">
+                <span className="text-[0.8rem] truncate mr-3" style={{ color: "var(--muted)" }}>{f.fileName}</span>
+                <button
+                  onClick={() => onRetryParse(f.uid)}
+                  className="text-[0.75rem] font-medium shrink-0"
+                  style={{ color: "var(--burgundy)" }}
+                >
+                  Retry
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {loading && (
         <div className="px-6 py-16 text-center text-[0.9rem]" style={{ color: "var(--muted)" }}>Loading…</div>
       )}
-      {!loading && groups.length === 0 && (
+      {!loading && groups.length === 0 && failedInvoices.length === 0 && parseFailures.length === 0 && (
         <div className="px-6 py-16 text-center">
           <p className="font-display text-[1.15rem] italic mb-2" style={{ color: "var(--muted)" }}>Queue is empty.</p>
           <p className="text-sm" style={{ color: "var(--muted)" }}>Select invoices from Home to queue them for scheduled chasing.</p>
@@ -2458,38 +2822,186 @@ function QueueScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSet
           const d = i.dueDate ?? "9999-12-31";
           return d < min ? d : min;
         }, "9999-12-31");
-        const calling = g.items.some((i) => i.status === "calling");
+        const lead = g.items[0];
+        const callStatus = lead?.call?.status ?? null;
+        const callId = lead?.call?.id ?? null;
+
+        const callIsDone = callStatus === "completed" || callStatus === "failed";
+        const isCalling = !callIsDone && g.items.some((i) => i.status === "calling");
+
+        // Items whose groupKey matches g.key are what the server will actually dispatch.
+        // Fuzzy-merged items from other DB groups are display-only; don't let their
+        // missing phone numbers block dispatch of the primary group.
+        const primaryItems = g.items.filter((i) => i.groupKey === g.key);
+        const primaryPending = primaryItems.filter((i) => i.status === "pending");
+        // Only warn "no phone" when every primary pending item lacks a number.
+        const hasNoPhone = primaryPending.length > 0 && primaryPending.every((i) => !i.toNumber);
+        const earliestChaseAfter = g.items.reduce((min, i) => {
+          const d = new Date(i.chaseAfter);
+          return d < min ? d : min;
+        }, new Date(8640000000000000));
+
+        // Mirror the server's dispatch logic: the lead (oldest-due eligible primary item)
+        // must have a toNumber. Any primary eligible item with a phone makes the group dispatchable.
+        const eligibleNow = !isCalling &&
+          primaryItems.some((i) => i.status === "pending" && !!i.toNumber && new Date(i.chaseAfter) <= now);
+
+        const chaseInFuture = !isCalling && earliestChaseAfter > now;
+
+        // Detect retry items (failed call, back in queue)
+        const isRetry = g.items.some((i) => i.status === "pending" && i.attempts > 0);
+        const retryChaseAfter = isRetry
+          ? g.items
+              .filter((i) => i.status === "pending" && i.attempts > 0)
+              .reduce((min, i) => {
+                const d = new Date(i.chaseAfter);
+                return d < min ? d : min;
+              }, new Date(8640000000000000))
+          : null;
+
+        const isGroupDispatching = dispatchingKey === g.key;
+
         return (
-          <div key={g.key} className="px-6 py-5" style={{ borderBottom: "1px solid var(--hairline)" }}>
-            <div className="flex items-start justify-between gap-3 mb-1.5">
-              <h3 className="font-display text-[1.15rem] leading-tight font-medium tracking-tight">{g.business}</h3>
-              <span className="font-display text-[1.1rem] font-medium whitespace-nowrap">{fmtAmount(g.items[0]?.currency, total)}</span>
-            </div>
-            <div className="flex items-center gap-2 mb-2.5">
-              <span className="font-mono text-[0.7rem]" style={{ color: "var(--muted)" }}>
-                {g.items.length} invoice{g.items.length === 1 ? "" : "s"}
-              </span>
-              {earliest !== "9999-12-31" && (
-                <>
-                  <span style={{ color: "var(--hairline-strong)" }}>·</span>
-                  <span className="font-mono text-[0.7rem]" style={{ color: "var(--muted)" }}>earliest due {fmtDate(earliest)}</span>
-                </>
-              )}
-              {calling && (
-                <span className="smallcaps px-2 py-0.5 rounded-sm dot-pulse" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>Calling</span>
-              )}
-            </div>
-            <div className="flex flex-col gap-1">
-              {g.items.map((i) => (
-                <div key={i.id} className="flex items-center justify-between text-[0.85rem]" style={{ color: "var(--muted)" }}>
-                  <span>{i.invoiceNumber ? `#${i.invoiceNumber}` : "Invoice"}{i.dueDate ? ` · due ${fmtDate(i.dueDate)}` : ""}</span>
-                  <span>{fmtAmount(i.currency, i.amountDue)}</span>
+          <div key={g.key} className="px-6 py-3.5" style={{ borderBottom: "1px solid var(--hairline)" }}>
+            <div className="flex items-start gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="font-display text-[1.15rem] leading-tight font-medium tracking-tight mb-1 truncate">
+                  {g.business}
                 </div>
-              ))}
+
+                {/* Line 2: count · amount */}
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[0.7rem]" style={{ color: "var(--muted)" }}>
+                    {g.items.length} invoice{g.items.length === 1 ? "" : "s"}
+                  </span>
+                  <span style={{ color: "var(--hairline-strong)" }}>·</span>
+                  <span className="font-display text-[0.85rem] font-medium">{fmtAmount(lead?.currency, total)}</span>
+                </div>
+
+                {/* Line 3: earliest due — only for multi-invoice groups; always reserves height for alignment */}
+                <div className="font-mono text-[0.7rem] mt-0.5" style={{ color: "var(--muted)", minHeight: "1rem" }}>
+                  {g.items.length > 1 && earliest !== "9999-12-31" && (
+                    <>earliest due {fmtDate(earliest)}</>
+                  )}
+                </div>
+
+                {/* Line 4: status message — always reserves height so tiles stay aligned */}
+                <div className="text-[0.75rem]" style={{ minHeight: "1rem" }}>
+                  {!isCalling && hasNoPhone && (
+                    <span style={{ color: "var(--burgundy)" }}>No phone number — add it in the spreadsheet or tap the pencil to edit</span>
+                  )}
+                  {!isCalling && !hasNoPhone && chaseInFuture && isRetry && retryChaseAfter && (
+                    <span style={{ color: "var(--muted)" }}>Retry from {fmtDate(retryChaseAfter.toISOString().slice(0, 10))}</span>
+                  )}
+                  {!isCalling && !hasNoPhone && chaseInFuture && !isRetry && (
+                    <span style={{ color: "var(--muted)" }}>Chase from {fmtDate(earliestChaseAfter.toISOString().slice(0, 10))}</span>
+                  )}
+                  {isCalling && callId && (
+                    <button onClick={() => onViewTranscript(callId)} style={{ color: "var(--burgundy)" }}>
+                      View transcript →
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-shrink-0 mt-0.5">
+                {/* Per-group dispatch button — always visible; enabled only when eligible */}
+                {!isCalling && (
+                  <button
+                    onClick={() => dispatchGroup(g.key)}
+                    disabled={!eligibleNow || isGroupDispatching || running}
+                    className="h-7 px-3 rounded-full text-[0.72rem] font-medium smallcaps transition active:scale-[0.97]"
+                    style={{
+                      background: eligibleNow ? "var(--ink)" : "var(--hairline)",
+                      color: eligibleNow ? "var(--cream)" : "var(--muted)",
+                      opacity: isGroupDispatching ? 0.6 : 1,
+                      cursor: eligibleNow && !isGroupDispatching && !running ? "pointer" : "default",
+                    }}
+                  >
+                    {isGroupDispatching ? "…" : "Dispatch"}
+                  </button>
+                )}
+
+                {/* Status badge */}
+                {isCalling && callStatus === "ringing" && (
+                  <span className="smallcaps px-2 py-0.5 rounded-sm dot-pulse" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>Ringing</span>
+                )}
+                {isCalling && callStatus === "in-progress" && (
+                  <span className="smallcaps px-2 py-0.5 rounded-sm dot-pulse" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>In conversation</span>
+                )}
+                {isCalling && !callStatus && (
+                  <span className="smallcaps px-2 py-0.5 rounded-sm dot-pulse" style={{ background: "var(--burgundy-tint)", color: "var(--burgundy)" }}>Calling</span>
+                )}
+              </div>
+            </div>
+
+            {/* Individual invoice rows */}
+            <div className="mt-2 flex flex-col gap-0.5">
+              {g.items.map((inv) => {
+                const canRemove = !["resolved", "cancelled"].includes(inv.status) && inv.id !== removing;
+                const canEdit = inv.status === "pending" && !isCalling;
+                return (
+                  <div key={inv.id} className="flex items-center justify-between" style={{ color: "var(--muted)" }}>
+                    <span className="text-[0.82rem]">
+                      {inv.invoiceNumber ? `#${inv.invoiceNumber}` : "Invoice"}
+                      {inv.dueDate ? ` · due ${fmtDate(inv.dueDate)}` : ""}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[0.82rem]">{fmtAmount(inv.currency, inv.amountDue)}</span>
+                      {canEdit && (
+                        <button
+                          onClick={() => onEditInvoice(inv)}
+                          className="w-5 h-5 flex items-center justify-center opacity-40 hover:opacity-70 transition-opacity"
+                          style={{ color: "var(--muted)" }}
+                          title="Edit invoice"
+                        >
+                          <PencilIcon />
+                        </button>
+                      )}
+                      {canRemove && (
+                        <button
+                          onClick={() => removeInvoice(inv.id)}
+                          className="text-[0.75rem] opacity-40 hover:opacity-80 transition-opacity leading-none"
+                          style={{ color: "var(--muted)" }}
+                          title="Remove from queue"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         );
       })}
+
+      {failedInvoices.length > 0 && (
+        <div className="px-6 py-4 mb-2" style={{ borderTop: "1px solid var(--hairline)" }}>
+          <p className="smallcaps mb-3" style={{ color: "var(--muted)" }}>Failed today</p>
+          <div className="flex flex-col gap-2">
+            {failedInvoices.map((inv) => (
+              <div key={inv.id} className="flex items-center justify-between">
+                <div className="min-w-0 flex-1">
+                  <span className="text-[0.85rem] font-medium">{inv.contactBusiness}</span>
+                  <span className="text-[0.82rem] ml-2" style={{ color: "var(--muted)" }}>
+                    {inv.invoiceNumber ? `#${inv.invoiceNumber}` : "Invoice"} · {fmtAmount(inv.currency, inv.amountDue)}
+                  </span>
+                </div>
+                <button
+                  onClick={() => retryInvoice(inv.id)}
+                  disabled={retrying === inv.id}
+                  className="h-7 px-3 rounded-full text-[0.72rem] font-medium smallcaps shrink-0"
+                  style={{ background: "var(--ink)", color: "var(--cream)", opacity: retrying === inv.id ? 0.6 : 1 }}
+                >
+                  {retrying === inv.id ? "…" : "Retry"}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div
         className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md px-5 pb-7 pt-14"
@@ -2498,11 +3010,15 @@ function QueueScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSet
         {msg && <p className="text-center text-[0.82rem] mb-2.5" style={{ color: "var(--muted)" }}>{msg}</p>}
         <button
           onClick={runNow}
-          disabled={running}
+          disabled={running || eligibleGroupCount === 0}
           className="w-full py-4 rounded-full font-medium text-[1rem] transition active:scale-[0.98]"
-          style={{ background: "var(--ink)", color: "var(--cream)", letterSpacing: "-0.01em", opacity: running ? 0.6 : 1 }}
+          style={{ background: "var(--ink)", color: "var(--cream)", letterSpacing: "-0.01em", opacity: (running || eligibleGroupCount === 0) ? 0.5 : 1 }}
         >
-          {running ? "Running…" : "Run scheduler now"}
+          {running
+            ? "Running…"
+            : eligibleGroupCount > 0
+              ? `Dispatch ${eligibleGroupCount} call${eligibleGroupCount === 1 ? "" : "s"}`
+              : "Nothing ready to dispatch"}
         </button>
       </div>
     </div>
@@ -2592,6 +3108,38 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
             </button>
           </div>
 
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="smallcaps">SMS follow-up</span>
+              <p className="text-[0.82rem]" style={{ color: "var(--muted)" }}>Auto-send an SMS after every call with invoice and payment details.</p>
+            </div>
+            <button
+              onClick={() => setS({ ...s, smsEnabled: !s.smsEnabled })}
+              className="px-4 py-2 rounded-full text-[0.82rem] font-medium border"
+              style={(s.smsEnabled ?? false)
+                ? { background: "var(--success-tint)", color: "var(--success)", borderColor: "var(--success)" }
+                : { background: "var(--cream-light)", color: "var(--muted)", borderColor: "var(--hairline-strong)" }}
+            >
+              {(s.smsEnabled ?? false) ? "On" : "Off"}
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="smallcaps">Auto-retry</span>
+              <p className="text-[0.82rem]" style={{ color: "var(--muted)" }}>Automatically requeue failed or no-answer calls. Turn off to keep them failed for manual retry from the queue.</p>
+            </div>
+            <button
+              onClick={() => setS({ ...s, autoRetry: !(s.autoRetry ?? true) })}
+              className="px-4 py-2 rounded-full text-[0.82rem] font-medium border"
+              style={(s.autoRetry ?? true)
+                ? { background: "var(--success-tint)", color: "var(--success)", borderColor: "var(--success)" }
+                : { background: "var(--cream-light)", color: "var(--muted)", borderColor: "var(--hairline-strong)" }}
+            >
+              {(s.autoRetry ?? true) ? "On" : "Off"}
+            </button>
+          </div>
+
           <div>
             <label className={labelCls} style={{ color: "var(--muted)" }}>Business hours (recipient local)</label>
             <div className="flex items-center gap-3">
@@ -2631,16 +3179,31 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
           </div>
 
           <div>
+            <label className={labelCls} style={{ color: "var(--muted)" }}>Retry delay (hours)</label>
+            <input type="number" min={1} max={168} value={s.retryDelayHours ?? 24} onChange={(e) => setS({ ...s, retryDelayHours: Number(e.target.value) })} className={field} style={fieldStyle} />
+            <p className="text-[0.78rem] mt-1" style={{ color: "var(--muted)" }}>Hours before a no-answer or failed call is retried. Max 168 (1 week).</p>
+          </div>
+
+          <div>
             <label className={labelCls} style={{ color: "var(--muted)" }}>Call order</label>
-            <div className="flex items-center gap-3">
-              <select value={s.sortField} onChange={(e) => setS({ ...s, sortField: e.target.value as SchedulerSettings["sortField"] })} className={field} style={fieldStyle}>
+            <div className="flex items-center gap-2">
+              <select
+                value={s.sortField}
+                onChange={(e) => setS({ ...s, sortField: e.target.value as SchedulerSettings["sortField"] })}
+                className={`${field} flex-1`}
+                style={fieldStyle}
+              >
                 <option value="overdue">Most overdue</option>
                 <option value="amount">Amount owed</option>
               </select>
-              <select value={s.sortDir} onChange={(e) => setS({ ...s, sortDir: e.target.value as SchedulerSettings["sortDir"] })} className={field} style={fieldStyle}>
-                <option value="asc">{s.sortField === "amount" ? "Smallest first" : "Oldest first"}</option>
-                <option value="desc">{s.sortField === "amount" ? "Largest first" : "Newest first"}</option>
-              </select>
+              <button
+                onClick={() => setS({ ...s, sortDir: s.sortDir === "asc" ? "desc" : "asc" })}
+                className="h-[42px] px-3.5 rounded-lg border text-[0.88rem] font-medium whitespace-nowrap flex-shrink-0 transition"
+                style={fieldStyle}
+                title={s.sortDir === "asc" ? "Ascending" : "Descending"}
+              >
+                {s.sortDir === "asc" ? "↑ Asc" : "↓ Desc"}
+              </button>
             </div>
           </div>
 
@@ -2668,7 +3231,7 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
 }
 
 export default function EnvoyApp() {
-  const [screen, setScreen] = useState<"home" | "compose" | "invoice-compose" | "bulk-invoice" | "select-invoice" | "bulk-summary" | "live" | "detail" | "queue" | "settings">("home");
+  const [screen, setScreen] = useState<"home" | "compose" | "invoice-compose" | "bulk-invoice" | "select-invoice" | "live" | "detail" | "queue" | "settings">("home");
   const [calls, setCalls] = useState<Call[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeCallId, setActiveCallId] = useState<string | null>(null);
@@ -2681,6 +3244,10 @@ export default function EnvoyApp() {
   const [driveFiles, setDriveFiles] = useState<DriveInvoiceFile[]>([]);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState<string | null>(null);
+  const driveFilesLastFetchedRef = useRef<number>(0);
+  const [queueEditInvoice, setQueueEditInvoice] = useState<QueuedInvoice | null>(null);
+  const [settingsPreviousScreen, setSettingsPreviousScreen] = useState<"home" | "queue">("queue");
+  const [queueReloadKey, setQueueReloadKey] = useState(0);
   const bulkItemsRef = useRef<BulkItem[]>([]);
   useEffect(() => { bulkItemsRef.current = bulkItems; }, [bulkItems]);
 
@@ -2696,7 +3263,8 @@ export default function EnvoyApp() {
     }
   }, []);
 
-  const loadDriveFiles = useCallback(async () => {
+  const loadDriveFiles = useCallback(async (force = false) => {
+    if (!force && driveFiles.length > 0 && Date.now() - driveFilesLastFetchedRef.current < 30_000) return;
     setDriveLoading(true);
     setDriveError(null);
     try {
@@ -2704,12 +3272,13 @@ export default function EnvoyApp() {
       const data = await r.json();
       if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
       setDriveFiles(data.files ?? []);
+      driveFilesLastFetchedRef.current = Date.now();
     } catch (e) {
       setDriveError(e instanceof Error ? e.message : "Failed to load Drive files");
     } finally {
       setDriveLoading(false);
     }
-  }, []);
+  }, [driveFiles.length]);
 
   const getBulkItemFile = async (item: BulkItem): Promise<File> => {
     if (item.file) return item.file;
@@ -2760,6 +3329,9 @@ export default function EnvoyApp() {
 
 
   useEffect(() => { fetchCalls(); }, [fetchCalls]);
+
+  // Pre-warm Drive file list in background so select-invoice screen opens instantly
+  useEffect(() => { loadDriveFiles(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Poll call status for dispatched bulk items
   useEffect(() => {
@@ -3263,7 +3835,102 @@ export default function EnvoyApp() {
     }
   };
 
+  const handleRetryParseUid = async (uid: string) => {
+    await runInvoicePipeline([uid], "queue");
+  };
+
   const activeCall = calls.find((c) => c.id === activeCallId) ?? null;
+
+  // Convert a QueuedInvoice to the InvoiceParseResult shape needed by InvoiceCompose.
+  const queueInvoiceToParseResult = (inv: QueuedInvoice): InvoiceParseResult => ({
+    contactBusiness: inv.contactBusiness,
+    contactPerson: inv.contactPerson ?? null,
+    toNumber: inv.toNumber ?? null,
+    invoiceNumber: inv.invoiceNumber ?? null,
+    invoiceDate: inv.invoiceDate ?? null,
+    dueDate: inv.dueDate ?? null,
+    amountDue: inv.amountDue ?? null,
+    currency: inv.currency ?? null,
+    lineItems: inv.lineItems ?? null,
+    invoiceNotes: inv.invoiceNotes ?? null,
+    bankName: inv.bankName ?? null,
+    bsb: inv.bsb ?? null,
+    accountNumber: inv.accountNumber ?? null,
+    swiftCode: inv.swiftCode ?? null,
+    abn: inv.abn ?? null,
+    remittanceName: inv.remittanceName ?? null,
+    remittanceContact: inv.remittanceContact ?? null,
+  });
+
+  // Save edits to a queue invoice without dispatching.
+  const handleQueueSave = async (state: BulkFormState) => {
+    if (!queueEditInvoice) return;
+    try {
+      await fetch(`/api/invoices/${queueEditInvoice.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          toNumber: state.toNumber || null,
+          contactBusiness: state.contactBusiness || null,
+          contactPerson: state.contactPerson || null,
+          abn: state.abn || null,
+          invoiceNumber: state.invoiceNumber || null,
+          invoiceDate: state.invoiceDate || null,
+          dueDate: state.dueDate || null,
+          amountDue: state.amountDue.trim() ? Number(state.amountDue) : null,
+          currency: state.currency || null,
+          lineItems: state.lineItems || null,
+          invoiceNotes: state.invoiceNotes || null,
+          bankName: state.bankName || null,
+          bsb: state.bsb || null,
+          accountNumber: state.accountNumber || null,
+          swiftCode: state.swiftCode || null,
+          remittanceName: state.remittanceName || null,
+          remittanceContact: state.remittanceContact || null,
+        }),
+      });
+    } catch (e) {
+      console.error("[queue edit] patch failed", e);
+    }
+    setQueueEditInvoice(null);
+    setQueueReloadKey((k) => k + 1);
+  };
+
+  // Save edits and immediately run the scheduler to dispatch eligible groups.
+  const handleQueueDispatch = async (brief: Record<string, unknown>) => {
+    if (!queueEditInvoice) return;
+    try {
+      await fetch(`/api/invoices/${queueEditInvoice.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          toNumber: brief.toNumber || null,
+          contactBusiness: brief.contactBusiness || null,
+          contactPerson: brief.contactPerson || null,
+          abn: brief.abn || null,
+          invoiceNumber: brief.invoiceNumber || null,
+          invoiceDate: brief.invoiceDate || null,
+          dueDate: brief.dueDate || null,
+          amountDue: brief.amountDue != null ? Number(brief.amountDue) : null,
+          currency: brief.currency || null,
+          lineItems: brief.lineItems || null,
+          invoiceNotes: brief.invoiceNotes || null,
+          bankName: brief.bankName || null,
+          bsb: brief.bsb || null,
+          accountNumber: brief.accountNumber || null,
+          swiftCode: brief.swiftCode || null,
+          remittanceName: brief.remittanceName || null,
+          remittanceContact: brief.remittanceContact || null,
+        }),
+      });
+      await fetch("/api/scheduler/tick?force=1", { method: "POST" });
+    } catch (e) {
+      console.error("[queue dispatch] failed", e);
+    }
+    setQueueEditInvoice(null);
+    setQueueReloadKey((k) => k + 1);
+    fetchCalls();
+  };
 
   return (
     <div className="max-w-md mx-auto min-h-screen relative" style={{ background: "var(--cream)", zIndex: 2 }}>
@@ -3271,11 +3938,16 @@ export default function EnvoyApp() {
         <Home
           calls={calls}
           loading={loading}
+          bulkItems={bulkItems}
           onNewCall={() => setScreen("compose")}
           onUploadInvoice={() => { setBulkItems([]); setScreen("select-invoice"); loadDriveFiles(); }}
           onSelectCall={(id) => { setActiveCallId(id); setReturnToBulk(false); setReturnToSummary(false); setScreen("detail"); }}
           onRefresh={fetchCalls}
           onOpenQueue={() => setScreen("queue")}
+          onOpenSettings={() => { setSettingsPreviousScreen("home"); setScreen("settings"); }}
+          onViewBulkDetail={async (callId) => { await fetchCalls(); setActiveCallId(callId); setReturnToSummary(true); setScreen("detail"); }}
+          onBulkItemDetails={openSummaryDetails}
+          onRetryFailed={handleRetryFailed}
         />
       )}
       {screen === "compose" && (
@@ -3314,11 +3986,19 @@ export default function EnvoyApp() {
       {screen === "queue" && (
         <QueueScreen
           onBack={() => { fetchCalls(); setScreen("home"); }}
-          onOpenSettings={() => setScreen("settings")}
+          onOpenSettings={() => { setSettingsPreviousScreen("queue"); setScreen("settings"); }}
+          onEditInvoice={(inv) => setQueueEditInvoice(inv)}
+          onViewTranscript={async (callId) => { await fetchCalls(); setActiveCallId(callId); setScreen("detail"); }}
+          reloadKey={queueReloadKey}
+          parseFailures={bulkItems.filter((i) => i.status === "parse-error")}
+          onRetryParse={handleRetryParseUid}
         />
       )}
       {screen === "settings" && (
-        <SettingsScreen onBack={() => setScreen("queue")} />
+        <SettingsScreen onBack={() => {
+          if (settingsPreviousScreen === "queue") setQueueReloadKey((k) => k + 1);
+          setScreen(settingsPreviousScreen);
+        }} />
       )}
       {screen === "live" && activeCallId && (
         <Live
@@ -3334,7 +4014,7 @@ export default function EnvoyApp() {
             if (returnToSummary) {
               setReturnToSummary(false);
               setActiveCallId(null);
-              setScreen("bulk-summary");
+              setScreen("home");
             } else if (returnToBulk) {
               setReturnToBulk(false);
               setActiveCallId(null);
@@ -3360,16 +4040,7 @@ export default function EnvoyApp() {
           onBack={() => { setBulkItems([]); setScreen("home"); }}
         />
       )}
-      {screen === "bulk-summary" && (
-        <BulkSummaryScreen
-          items={bulkItems}
-          onViewDetail={async (callId) => { await fetchCalls(); setActiveCallId(callId); setReturnToSummary(true); setScreen("detail"); }}
-          onDetails={openSummaryDetails}
-          onBack={() => { fetchCalls(); setBulkItems([]); setScreen("home"); }}
-          onRetryFailed={handleRetryFailed}
-        />
-      )}
-      {screen === "bulk-summary" && summaryEditUid && (() => {
+      {screen === "home" && summaryEditUid && (() => {
         const editItem = bulkItems.find((i) => i.uid === summaryEditUid);
         return (
           <div className="absolute inset-0" style={{ background: "var(--cream)", zIndex: 3 }}>
@@ -3400,6 +4071,17 @@ export default function EnvoyApp() {
           </div>
         );
       })()}
+      {screen === "queue" && queueEditInvoice && (
+        <div className="absolute inset-0" style={{ background: "var(--cream)", zIndex: 3 }}>
+          <InvoiceCompose
+            key={`queue-edit-${queueEditInvoice.id}`}
+            onCancel={() => setQueueEditInvoice(null)}
+            onPlace={handleQueueDispatch}
+            preloaded={{ parsed: queueInvoiceToParseResult(queueEditInvoice) }}
+            onBackWithState={handleQueueSave}
+          />
+        </div>
+      )}
     </div>
   );
 }
