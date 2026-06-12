@@ -141,6 +141,7 @@ export async function POST(req: NextRequest) {
         objective,
         voice,
         manner,
+        userName,
         invoiceNumber,
         invoiceDate,
         dueDate,

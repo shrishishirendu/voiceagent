@@ -155,9 +155,16 @@ function sumSingleCurrency(invoices: InvoiceBlock[]): { amount: number; currency
 }
 
 // The spoken opening line, localized to the voice's language (and gender for Hindi).
-export function buildFirstMessage(userName: string, language: Language = "en", gender: Gender = "m"): string {
-  return language === "hi"
-    ? `नमस्ते, मैं ${userName} की ओर से एनवॉय बोल ${gender === "f" ? "रही" : "रहा"} हूँ — क्या अभी थोड़ी बात हो सकती है?`
+// When `brief` is provided the agent states the reason in the very first line instead
+// of asking for a generic chat — "regarding an overdue invoice of $500" etc.
+export function buildFirstMessage(userName: string, language: Language = "en", gender: Gender = "m", brief?: string): string {
+  if (language === "hi") {
+    return brief
+      ? `नमस्ते, मैं ${userName} की ओर से ${brief} के बारे में बात करने के लिए एनवॉय बोल ${gender === "f" ? "रही" : "रहा"} हूँ — क्या अभी बात हो सकती है?`
+      : `नमस्ते, मैं ${userName} की ओर से एनवॉय बोल ${gender === "f" ? "रही" : "रहा"} हूँ — क्या अभी थोड़ी बात हो सकती है?`;
+  }
+  return brief
+    ? `Hi, this is Envoy calling on behalf of ${userName} regarding ${brief}. Are you available to talk about this?`
     : `Hi, this is Envoy calling on behalf of ${userName}. Is now an okay time for a quick chat?`;
 }
 
@@ -192,6 +199,8 @@ interface BuildSystemPromptArgs {
   invoiceNotes?: string;
   // Aggregated multi-invoice list (scheduler path). One call chasing N invoices.
   invoices?: InvoiceBlock[];
+  // Pre-computed opening brief injected into firstMessage and the system-prompt reminder.
+  invoiceBrief?: string;
   bankName?: string;
   bsb?: string;
   accountNumber?: string;
@@ -251,6 +260,7 @@ export function buildSystemPrompt(args: BuildSystemPromptArgs): string {
     currency,
     lineItems,
     invoiceNotes,
+    invoiceBrief,
   } = args;
 
   // Resolve the invoice list: the aggregated `invoices` array wins; otherwise fall
@@ -361,7 +371,7 @@ When the objective is resolved (success OR a clear no), say a natural farewell (
 If you hear a beep, hear phrases like "audio message", "leave a message", "record your message", "send a message after the tone", "not available", "unavailable", or any other sign that you have reached a voicemail or automated recording system: say the following word for word — "${vmScript}" — then immediately use the endCall function to hang up. Do not say anything else. Do not wait.
 
 # Opening line
-Your opening line has already been delivered: "${buildFirstMessage(userName, language)}" Once they confirm, briefly state the purpose of the call in plain terms — do not repeat the greeting.${invoiceSection}`;
+Your opening line has already been delivered: "${buildFirstMessage(userName, language, gender, invoiceBrief)}" Once they confirm availability, move directly into the specifics — do not repeat the opening line or the reason already stated.${invoiceSection}`;
 }
 
 interface CreateCallArgs {
@@ -410,6 +420,25 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
   const language = voice.language;
   const gender = voice.gender;
 
+  // Aggregate context for voicemail + post-call summary when chasing multiple invoices.
+  const invoiceCount = args.invoices && args.invoices.length > 0 ? args.invoices.length : args.invoiceNumber ? 1 : 0;
+  const aggregate = invoiceCount > 1 ? sumSingleCurrency(args.invoices!) : null;
+  const hasInvoiceContext = invoiceCount > 0;
+
+  // One-line reason injected into the opening line so the agent states purpose upfront.
+  let invoiceBrief: string | undefined;
+  if (invoiceCount > 1) {
+    invoiceBrief = aggregate
+      ? `${invoiceCount} overdue invoices totalling ${fmtAmount(aggregate.currency, aggregate.amount)}`
+      : `${invoiceCount} overdue invoices`;
+  } else if (invoiceCount === 1) {
+    const singleAmt = args.invoices?.[0]?.amountDue ?? args.amountDue;
+    const singleCur = args.invoices?.[0]?.currency ?? args.currency;
+    invoiceBrief = singleAmt != null
+      ? `an overdue invoice of ${fmtAmount(singleCur, singleAmt)}`
+      : "an overdue invoice";
+  }
+
   const systemPrompt = buildSystemPrompt({
     userName: args.userName,
     contactBusiness: args.contactBusiness,
@@ -426,6 +455,7 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
     lineItems: args.lineItems,
     invoiceNotes: args.invoiceNotes,
     invoices: args.invoices,
+    invoiceBrief,
     bankName: args.bankName,
     bsb: args.bsb,
     accountNumber: args.accountNumber,
@@ -434,11 +464,6 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
     remittanceName: args.remittanceName,
     remittanceContact: args.remittanceContact,
   });
-
-  // Aggregate context for voicemail + post-call summary when chasing multiple invoices.
-  const invoiceCount = args.invoices && args.invoices.length > 0 ? args.invoices.length : args.invoiceNumber ? 1 : 0;
-  const aggregate = invoiceCount > 1 ? sumSingleCurrency(args.invoices!) : null;
-  const hasInvoiceContext = invoiceCount > 0;
 
   // Vapi accepts a transient assistant inline — no need to pre-create one
   const body = {
@@ -455,16 +480,17 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
     // The AI agent config (transient — used only for this call)
     assistant: {
       name: "Envoy",
-      firstMessage: buildFirstMessage(args.userName, language, gender),
+      firstMessage: buildFirstMessage(args.userName, language, gender, invoiceBrief),
       // Speech-to-text. Hindi uses nova-3 "multi" so the agent can follow natural
       // Hindi/English (Hinglish) code-switching; English keeps nova-2 for accuracy.
+      // endpointing: ms of silence before Deepgram marks end-of-turn (lower = faster).
       transcriber: language === "hi"
-        ? { provider: "deepgram", model: "nova-3", language: "multi" }
-        : { provider: "deepgram", model: "nova-2", language: "en" },
-      // The LLM brain — Claude
+        ? { provider: "deepgram", model: "nova-3", language: "multi", endpointing: 200 }
+        : { provider: "deepgram", model: "nova-2", language: "en", endpointing: 200 },
+      // The LLM brain — Haiku for fast first-token latency (shorter pause after user speaks).
       model: {
         provider: "anthropic",
-        model: "claude-sonnet-4-6",
+        model: "claude-haiku-4-5-20251001",
         temperature: 0.4,
         messages: [
           {
@@ -480,6 +506,8 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
         ...DEFAULT_VOICE_SETTINGS,
         ...voice.settings,
       },
+      // Latency tuning: no artificial post-VAD delay.
+      responseDelaySeconds: 0,
       // Behaviour
       maxDurationSeconds: 600, // 10 min hard cap
       silenceTimeoutSeconds: 30,
@@ -490,10 +518,11 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
       endCallPhrases: language === "hi"
         ? ["goodbye", "अलविदा"]
         : ["goodbye", "talk to you later", "bye now", "have a good one"],
+      // Vapi-native voicemail detection (hybrid Gemini + beep). Replaces legacy Twilio
+      // AMD, which mis-classified human answers as voicemail (machine_end_beep) on every
+      // call and triggered Twilio 15003 AMD-callback errors. Vapi's docs recommend this.
       voicemailDetection: {
-        provider: "twilio",
-        voicemailDetectionTypes: ["machine_end_beep", "machine_end_silence", "machine_end_other"],
-        enabled: true,
+        provider: "vapi",
       },
       voicemailMessage: buildVoicemailMessage({
         contactBusiness: args.contactBusiness,
