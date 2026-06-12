@@ -17,6 +17,7 @@ model Call {
   objective       String
   voice           String   @default("iris")
   manner          String   @default("warm")
+  userName        String   @default("the caller")
   invoiceNumber   String?
   invoiceDate     String?
   dueDate         String?
@@ -108,7 +109,10 @@ model Settings {
   bhDays        String  @default("1,2,3,4,5")  // ISO weekdays Mon-Fri
   timezone      String  @default("Australia/Sydney")
   dueOffsetDays Int     @default(0)            // chase dueDate + N days
-  sortField     String  @default("overdue")   // overdue | amount
-  sortDir       String  @default("asc")        // asc | desc (overdue+asc = most overdue first)
-  schedulerOn   Boolean @default(true)
+  sortField       String  @default("overdue")   // overdue | amount
+  sortDir         String  @default("asc")        // asc | desc (overdue+asc = most overdue first)
+  schedulerOn     Boolean @default(true)
+  smsEnabled      Boolean @default(false)        // send SMS follow-up after every call
+  retryDelayHours Int     @default(24)           // hours before requeuing a no-answer/failed invoice
+  autoRetry       Boolean @default(true)         // auto-requeue no-answer/failed invoices; off = stay failed for manual retry
 }

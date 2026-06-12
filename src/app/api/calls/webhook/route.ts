@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { MAX_INVOICE_ATTEMPTS } from "@/lib/dispatcher";
+import { MAX_INVOICE_ATTEMPTS, getSettings } from "@/lib/dispatcher";
+import { sendPostCallSms } from "@/lib/sms";
 
 /**
  * Vapi webhook receiver.
@@ -213,9 +214,23 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ ok: false, error: "db error" }, { status: 500 });
       }
 
+      // Load settings once for retry delay, SMS flag, and auto-retry toggle.
+      let retryDelayHours = 24;
+      let smsEnabled = false;
+      let autoRetry = true;
+      try {
+        const settings = await getSettings();
+        retryDelayHours = settings.retryDelayHours ?? 24;
+        smsEnabled = settings.smsEnabled ?? false;
+        autoRetry = settings.autoRetry ?? true;
+      } catch {
+        // keep defaults
+      }
+
       // Resolve or requeue any invoices aggregated into this call. A reached contact
       // (success/partial) settles them; no-answer/failed requeues under the attempt cap
-      // (chaseAfter ~24h out; the worker's business-hours gate still applies).
+      // (chaseAfter = configurable retryDelayHours out; the business-hours gate still applies).
+      // When autoRetry is off, failed/no-answer invoices are marked failed immediately instead.
       try {
         if (outcome === "success" || outcome === "partial") {
           await prisma.invoice.updateMany({
@@ -225,18 +240,34 @@ export async function POST(req: NextRequest) {
         } else {
           const linked = await prisma.invoice.findMany({ where: { callId: call.id, status: "calling" } });
           for (const inv of linked) {
-            if (inv.attempts >= MAX_INVOICE_ATTEMPTS) {
+            if (!autoRetry || inv.attempts >= MAX_INVOICE_ATTEMPTS) {
               await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed", callId: null } });
             } else {
               await prisma.invoice.update({
                 where: { id: inv.id },
-                data: { status: "pending", callId: null, chaseAfter: new Date(Date.now() + 24 * 60 * 60 * 1000) },
+                data: {
+                  status: "pending",
+                  callId: null,
+                  chaseAfter: new Date(Date.now() + retryDelayHours * 60 * 60 * 1000),
+                },
               });
             }
           }
         }
       } catch (err) {
         console.error("[webhook] invoice resolution failed", err);
+      }
+
+      // SMS follow-up — fire and forget; never let SMS failure affect webhook response.
+      console.log("[sms] check: smsEnabled=%s toNumber=%s outcome=%s", smsEnabled, call.toNumber ?? "(null)", outcome);
+      if (smsEnabled && call.toNumber) {
+        console.log("[sms] firing for call", call.id);
+        sendPostCallSms({ ...call, userName: call.userName ?? "our client" }, outcome).catch((err) =>
+          console.error("[webhook] SMS send failed:", err)
+        );
+      } else {
+        if (!smsEnabled) console.log("[sms] skipped — smsEnabled is false in settings");
+        if (!call.toNumber) console.log("[sms] skipped — toNumber is null for call", call.id);
       }
       break;
     }

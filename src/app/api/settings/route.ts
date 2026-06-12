@@ -18,6 +18,9 @@ const SettingsSchema = z.object({
   sortField: z.enum(["overdue", "amount"]).optional(),
   sortDir: z.enum(["asc", "desc"]).optional(),
   schedulerOn: z.boolean().optional(),
+  smsEnabled: z.boolean().optional(),
+  retryDelayHours: z.number().int().min(1).max(168).optional(),
+  autoRetry: z.boolean().optional(),
 });
 
 export async function PUT(req: NextRequest) {
