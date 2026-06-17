@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/Users/shrey/Documents/GitHub/voiceagent -name \"*.pdf\" 2>/dev/null | head -10; find /c/Users/shrey/Downloads -name \"*.pdf\" 2>/dev/null | head -10; find /c/Users/shrey/Desktop -name \"*.pdf\" 2>/dev/null | head -10)",
+      "Read(//c/Users/shrey/Downloads/**)",
+      "Read(//c/Users/shrey/Desktop/**)",
+      "Read(//c/Users/shrey/**)",
+      "Bash(xargs grep -li \"invoice\\\\|Invoice\\\\|INVOICE\")",
+      "mcp__playwright__browser_navigate",
+      "Bash(curl -s -X POST \"http://localhost:3000/api/drive/contacts\" -H \"Content-Type: application/json\" -d '{\"contacts\":[{\"businessName\":\"Spiced Tea\",\"abn\":\"12345678901\"}]}')",
+      "Bash(curl -s \"http://localhost:3000/api/drive/invoice-file?fileId=1UisvgOZmzEwhlh8THAqLYd7-3Z5SXyQW\" -o /tmp/spiced_tea.pdf)",
+      "Bash(curl -s -X POST \"http://localhost:3000/api/calls/parse-document\" -F \"document=@/tmp/spiced_tea.pdf;type=application/pdf\")",
+      "Bash(curl -s -X POST \"http://localhost:3000/api/drive/contacts\" -H \"Content-Type: application/json\" -d '{\"contacts\":[{\"businessName\":\"iSoft Software\",\"abn\":\"18 630 456 067\",\"email\":null,\"contactPerson\":null}]}')",
+      "Bash(Select-String -Pattern \"\\\\.\\(png|jpg|jpeg\\)$\")",
+      "Bash(dir *.png /b /o-d)",
+      "Bash(Get-ChildItem \"c:\\\\Users\\\\shrey\\\\Documents\\\\GitHub\\\\voiceagent\" -Filter \"*.png\")",
+      "Bash(Sort-Object LastWriteTime -Descending)",
+      "Bash(Select-Object -First 5)",
+      "Bash(Format-Table Name, LastWriteTime)",
+      "Bash(node scripts/drive-diag.cjs)",
+      "Bash(node scripts/drive-read.cjs)",
+      "Bash(node scripts/drive-verify-write.cjs)",
+      "Bash(git commit -m ' *)",
+      "Bash(netstat *)",
+      "Bash(taskkill *)",
+      "Bash(npm run db:push)",
+      "Bash(npm run dev:all)",
+      "Bash(npm run dev)",
+      "Bash(npm run scheduler)",
+      "Bash(Invoke-WebRequest *)",
+      "Bash(Start-Process *)"
+    ]
+  }
+}
