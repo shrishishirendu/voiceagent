@@ -6,7 +6,7 @@ AI agent that places phone calls on your behalf. Built on Next.js + Vapi + Twili
 
 | Flow | How to trigger |
 |---|---|
-| **Single call** | Fill in the brief manually → Dispatch |
+| **Single call** | Fill in the brief manually -> Dispatch |
 | **Invoice batch** | Select invoices (Drive tab or file upload) → parse with Gemini → dispatch one call per invoice |
 | **Retry failures** | After a batch settles, hit **Retry failed** — "no phone" items re-resolve from the spreadsheet first so adding a number and retrying is seamless |
 
