@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const calls = await prisma.call.findMany({
     orderBy: { createdAt: "desc" },
@@ -10,7 +12,7 @@ export async function GET() {
   return NextResponse.json({
     calls: calls.map((c) => ({
       id: c.id,
-      contactName: c.contactName,
+      contactBusiness: c.contactBusiness,
       toNumber: c.toNumber,
       objective: c.objective,
       status: c.status,
@@ -18,8 +20,11 @@ export async function GET() {
       result: c.result,
       summary: c.summary,
       durationSec: c.durationSec,
-      transcript: c.transcript ? JSON.parse(c.transcript) : [],
+      transcript: (() => { try { return c.transcript ? JSON.parse(c.transcript) : []; } catch { return []; } })(),
       recordingUrl: c.recordingUrl,
+      endedReason: c.endedReason ?? null,
+      voicemailScript: c.voicemailScript ?? null,
+      invoiceNumber: c.invoiceNumber ?? null,
       createdAt: c.createdAt,
     })),
   });

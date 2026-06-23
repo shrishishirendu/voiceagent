@@ -1,21 +1,38 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
-  provider = "sqlite"    
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 model Call {
   id              String   @id @default(cuid())
 
   // Brief (set by user before dispatch)
-  contactName     String
+  contactBusiness String
+  contactPerson   String?
   toNumber        String
   objective       String
   voice           String   @default("marcus")
   manner          String   @default("warm")
+  invoiceNumber   String?
+  invoiceDate     String?
+  dueDate         String?
+  amountDue       Float?
+  currency        String?
+  lineItems       String?  // JSON string
+  invoiceNotes    String?
+  bankName        String?
+  bsb             String?
+  accountNumber   String?
+  swiftCode       String?
+  abn             String?
+  remittanceName  String?
+  remittanceContact String?
 
   // Vapi state
   vapiCallId      String?  @unique
@@ -28,6 +45,7 @@ model Call {
   result          String?
   summary         String?
   transcript      String?  // JSON string of [{who, text}]
+  voicemailScript String?
   recordingUrl    String?
 
   createdAt       DateTime @default(now())
