@@ -229,8 +229,10 @@ function totalAmountSpoken(invoices: InvoiceBlock[]): string {
 
 // Render one invoice as an indented block for the multi-invoice "# Invoices" list.
 function formatOneInvoice(inv: InvoiceBlock, index: number): string {
+  const today = new Date().toISOString().split("T")[0];
+  const dueStatus = inv.dueDate ? (inv.dueDate < today ? "overdue" : "not yet due") : null;
   const lines = [
-    `Invoice ${index + 1}${inv.invoiceNumber ? ` (number ${inv.invoiceNumber})` : ""}:`,
+    `Invoice ${index + 1}${inv.invoiceNumber ? ` (number ${inv.invoiceNumber})` : ""}${dueStatus ? ` — ${dueStatus}` : ""}:`,
     `  Invoice date: ${inv.invoiceDate ?? "not specified"}`,
     `  Due date: ${inv.dueDate ?? "not specified"}`,
     `  Amount due: ${fmtAmount(inv.currency, inv.amountDue)}`,
@@ -310,7 +312,7 @@ ${invoiceList[0].invoiceNotes ? `Notes: ${invoiceList[0].invoiceNotes}` : ""}${p
       : `
 
 # Invoices
-You are calling about ${invoiceList.length} outstanding invoices from this business. Do not proactively read out invoice numbers; refer to them naturally (e.g. "the oldest invoice", "the one due in March", or by amount). Only read an invoice number if the contact explicitly asks.
+You are calling about ${invoiceList.length} outstanding invoices from this business. Do not proactively read out invoice numbers; refer to them naturally (e.g. "the oldest invoice", "the one due in March", or by amount). Only read an invoice number if the contact explicitly asks. Each invoice below is marked "overdue" or "not yet due" — lead the conversation with the overdue ones; only discuss a "not yet due" invoice if the contact brings it up themselves.
 
 ${invoiceList.map(formatOneInvoice).join("\n\n")}
 
@@ -426,11 +428,22 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
   const hasInvoiceContext = invoiceCount > 0;
 
   // One-line reason injected into the opening line so the agent states purpose upfront.
+  // Only genuinely overdue invoices are counted/labelled "overdue" here — a not-yet-due
+  // invoice included as context shouldn't be misrepresented in the very first thing said.
+  const today = new Date().toISOString().split("T")[0];
+  const overdueInvoices = (args.invoices ?? []).filter((i) => i.dueDate && i.dueDate < today);
   let invoiceBrief: string | undefined;
   if (invoiceCount > 1) {
-    invoiceBrief = aggregate
-      ? `${invoiceCount} overdue invoices totalling ${fmtAmount(aggregate.currency, aggregate.amount)}`
-      : `${invoiceCount} overdue invoices`;
+    if (overdueInvoices.length > 0) {
+      const overdueAggregate = sumSingleCurrency(overdueInvoices);
+      invoiceBrief = overdueAggregate
+        ? `${overdueInvoices.length} overdue invoices totalling ${fmtAmount(overdueAggregate.currency, overdueAggregate.amount)}`
+        : `${overdueInvoices.length} overdue invoices`;
+    } else {
+      invoiceBrief = aggregate
+        ? `${invoiceCount} outstanding invoices totalling ${fmtAmount(aggregate.currency, aggregate.amount)}`
+        : `${invoiceCount} outstanding invoices`;
+    }
   } else if (invoiceCount === 1) {
     const singleAmt = args.invoices?.[0]?.amountDue ?? args.amountDue;
     const singleCur = args.invoices?.[0]?.currency ?? args.currency;

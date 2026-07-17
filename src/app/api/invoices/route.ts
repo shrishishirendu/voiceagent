@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { computeGroupKey, getSettings, normalisePhone } from "@/lib/dispatcher";
+import { computeGroupKey, getSettings, normalisePhone, syncCallFromVapi } from "@/lib/dispatcher";
 import { companyNamesMatch } from "@/lib/nameUtils";
 
 /**
@@ -68,58 +68,68 @@ export async function POST(req: NextRequest) {
   const chaseAfter = computeChaseAfter(d.dueDate, settings.dueOffsetDays);
   const groupKey = computeGroupKey(d.abn, d.contactBusiness);
 
-  // Fuzzy group-key resolution: if an existing active invoice has the same company
-  // (even under a different name variant or with/without ABN), reuse its groupKey so
-  // they collapse into one debtor group instead of fragmenting across multiple.
-  const activeInvoices = await prisma.invoice.findMany({
-    where: { status: { in: ["pending", "queued", "calling"] } },
-    select: { groupKey: true, contactBusiness: true },
-  });
-  const matchedGroup = activeInvoices.find((i) =>
-    companyNamesMatch(i.contactBusiness, d.contactBusiness)
-  );
-  const resolvedGroupKey = matchedGroup?.groupKey ?? groupKey;
-
-  // Idempotent: if an active invoice with the same number already exists for this debtor, return it.
-  if (d.invoiceNumber) {
-    const dup = await prisma.invoice.findFirst({
-      where: { groupKey: resolvedGroupKey, invoiceNumber: d.invoiceNumber, status: { in: ["pending", "queued", "calling"] } },
-    });
-    if (dup) {
-      return NextResponse.json({ id: dup.id, groupKey: resolvedGroupKey, chaseAfter: dup.chaseAfter, duplicate: true });
-    }
-  }
-
   try {
-    const invoice = await prisma.invoice.create({
-      data: {
-        contactBusiness: d.contactBusiness,
-        contactPerson: d.contactPerson,
-        toNumber: d.toNumber ? normalisePhone(d.toNumber) : null,
-        abn: d.abn,
-        groupKey: resolvedGroupKey,
-        userName: d.userName,
-        voice: d.voice,
-        manner: d.manner,
-        objective: d.objective,
-        invoiceNumber: d.invoiceNumber,
-        invoiceDate: d.invoiceDate,
-        dueDate: d.dueDate,
-        amountDue: d.amountDue,
-        currency: d.currency,
-        lineItems: d.lineItems,
-        invoiceNotes: d.invoiceNotes,
-        bankName: d.bankName,
-        bsb: d.bsb,
-        accountNumber: d.accountNumber,
-        swiftCode: d.swiftCode,
-        remittanceName: d.remittanceName,
-        remittanceContact: d.remittanceContact,
-        chaseAfter,
-        status: "pending",
-      },
+    // Read (fuzzy group-key resolution + dup check) and write happen in one transaction
+    // so concurrent creates for the same business (e.g. a bulk upload firing requests
+    // in quick succession) can't each read a pre-commit state that's missing the other's
+    // not-yet-committed row — without this, two invoices for the same company can end up
+    // with different groupKeys instead of collapsing into one debtor group.
+    const result = await prisma.$transaction(async (tx) => {
+      const activeInvoices = await tx.invoice.findMany({
+        where: { status: { in: ["pending", "queued", "calling"] } },
+        select: { groupKey: true, contactBusiness: true },
+      });
+      const matchedGroup = activeInvoices.find((i) =>
+        companyNamesMatch(i.contactBusiness, d.contactBusiness)
+      );
+      const resolvedGroupKey = matchedGroup?.groupKey ?? groupKey;
+
+      // Idempotent: if an active invoice with the same number already exists for this debtor, return it.
+      if (d.invoiceNumber) {
+        const dup = await tx.invoice.findFirst({
+          where: { groupKey: resolvedGroupKey, invoiceNumber: d.invoiceNumber, status: { in: ["pending", "queued", "calling"] } },
+        });
+        if (dup) {
+          return { duplicate: true as const, id: dup.id, groupKey: resolvedGroupKey, chaseAfter: dup.chaseAfter };
+        }
+      }
+
+      const invoice = await tx.invoice.create({
+        data: {
+          contactBusiness: d.contactBusiness,
+          contactPerson: d.contactPerson,
+          toNumber: d.toNumber ? normalisePhone(d.toNumber) : null,
+          abn: d.abn,
+          groupKey: resolvedGroupKey,
+          userName: d.userName,
+          voice: d.voice,
+          manner: d.manner,
+          objective: d.objective,
+          invoiceNumber: d.invoiceNumber,
+          invoiceDate: d.invoiceDate,
+          dueDate: d.dueDate,
+          amountDue: d.amountDue,
+          currency: d.currency,
+          lineItems: d.lineItems,
+          invoiceNotes: d.invoiceNotes,
+          bankName: d.bankName,
+          bsb: d.bsb,
+          accountNumber: d.accountNumber,
+          swiftCode: d.swiftCode,
+          remittanceName: d.remittanceName,
+          remittanceContact: d.remittanceContact,
+          chaseAfter,
+          status: "pending",
+        },
+      });
+      return { duplicate: false as const, id: invoice.id, groupKey: resolvedGroupKey, chaseAfter };
     });
-    return NextResponse.json({ id: invoice.id, groupKey: resolvedGroupKey, chaseAfter });
+
+    return NextResponse.json(
+      result.duplicate
+        ? { id: result.id, groupKey: result.groupKey, chaseAfter: result.chaseAfter, duplicate: true }
+        : { id: result.id, groupKey: result.groupKey, chaseAfter: result.chaseAfter }
+    );
   } catch (err) {
     console.error("[invoices] create failed:", err);
     return NextResponse.json({ error: "Failed to queue invoice" }, { status: 500 });
@@ -158,17 +168,40 @@ export async function GET() {
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
 
-  const invoices = await prisma.invoice.findMany({
+  const findArgs = {
     where: {
       OR: [
         { status: { in: ["pending", "queued", "calling"] } },
         { status: { in: ["resolved", "failed"] }, updatedAt: { gte: startOfToday } },
       ],
     },
-    orderBy: { chaseAfter: "asc" },
+    orderBy: { chaseAfter: "asc" as const },
     include: {
-      call: { select: { id: true, status: true, outcome: true } },
+      call: { select: { id: true, status: true, outcome: true, vapiCallId: true, createdAt: true } },
     },
-  });
+  };
+
+  const invoices = await prisma.invoice.findMany(findArgs);
+
+  // Self-heal any non-terminal linked call directly from Vapi (mirrors the Live
+  // screen's poll) so the Queue screen doesn't show a stale status when the
+  // end-of-call-report webhook is missed or delayed. One probe per distinct call,
+  // not per invoice — an aggregated call is linked to many invoice rows.
+  const staleCallIds = Array.from(
+    new Set(
+      invoices
+        .map((i) => i.call)
+        .filter((c): c is NonNullable<typeof c> => !!c && !!c.vapiCallId && c.status !== "completed" && c.status !== "failed")
+        .map((c) => c.id)
+    )
+  );
+
+  if (staleCallIds.length > 0) {
+    const staleCalls = await prisma.call.findMany({ where: { id: { in: staleCallIds } } });
+    await Promise.all(staleCalls.map((c) => syncCallFromVapi(c)));
+    const refreshed = await prisma.invoice.findMany(findArgs);
+    return NextResponse.json({ invoices: refreshed });
+  }
+
   return NextResponse.json({ invoices });
 }

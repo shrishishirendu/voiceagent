@@ -1,21 +1,22 @@
 {
-  "name": "envoy",
+  "name": "envoy-demo3",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "next dev -p 3010",
     "dev:all": "concurrently -n web,worker -c blue,magenta \"npm:dev\" \"npm:scheduler\"",
     "scheduler": "tsx scripts/scheduler.ts",
     "build": "prisma generate && next build",
-    "start": "next start",
+    "start": "next start -p 3010",
     "lint": "next lint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
-    "tunnel": "ngrok http 3000"
+    "tunnel": "ngrok http 3010"
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",
     "dotenv": "^16.4.5",
+    "framer-motion": "^12.42.2",
     "googleapis": "^173.0.0",
     "next": "14.2.15",
     "node-cron": "^3.0.3",

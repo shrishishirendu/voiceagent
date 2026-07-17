@@ -4,7 +4,7 @@ const nextConfig = {
   // Allow ngrok/Vercel previews
   experimental: {
     // Restrict server action origins. Add your ngrok URL or Vercel preview URL here when needed.
-    serverActions: { allowedOrigins: ["localhost:3000"] },
+    serverActions: { allowedOrigins: ["localhost:3010"] },
   },
 };
 

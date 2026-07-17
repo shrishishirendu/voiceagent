@@ -13,9 +13,11 @@ import {
   buildVoicemailMessage,
   getVoiceLanguage,
   getVoiceGender,
+  probeVapiCall,
   type InvoiceBlock,
 } from "@/lib/vapi";
-import type { Invoice, Settings } from "@prisma/client";
+import { companyNamesMatch } from "@/lib/nameUtils";
+import type { Call, Invoice, Settings } from "@prisma/client";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
@@ -133,6 +135,137 @@ export async function freeCallSlots(): Promise<number> {
   return Math.max(0, MAX_ACTIVE_CALLS - active);
 }
 
+// --- Call status sync (Vapi reconciliation) -------------------------------
+// Shared by the Live screen poll (/api/calls/[id]) and the Queue screen poll
+// (/api/invoices) so a call's status self-heals from Vapi's own record even
+// when the end-of-call-report webhook is missed or delayed.
+
+const CALL_STATUS_RANK: Record<string, number> = {
+  dispatching: 0, queued: 1, ringing: 2, "in-progress": 3, completed: 4, failed: 4,
+};
+
+function deriveCallOutcome(endedReason?: string, successEval?: string): string {
+  const r = (endedReason ?? "").toLowerCase();
+  if (r.includes("no-answer") || r.includes("voicemail") || r.includes("busy") || r.includes("machine")) return "no-answer";
+  if (successEval) {
+    const s = successEval.toLowerCase();
+    if (s.includes("success") || s === "true" || s === "pass") return "success";
+    if (s.includes("partial")) return "partial";
+    if (s.includes("fail") || s === "false") return "failed";
+  }
+  if (!endedReason) return "success";
+  if (r.includes("error") || r.includes("failed")) return "failed";
+  return "success";
+}
+
+function formatCallMessages(
+  messages?: Array<{ role: string; message?: string; content?: string }>
+): string {
+  if (!messages?.length) return JSON.stringify([]);
+  return JSON.stringify(
+    messages
+      .filter((m) => m.role === "assistant" || m.role === "user" || m.role === "bot")
+      .map((m) => ({ who: m.role === "user" ? "them" : "envoy", text: m.message ?? m.content ?? "" }))
+      .filter((m) => m.text.length > 0)
+  );
+}
+
+type VapiCallDetail = Record<string, unknown> & {
+  status?: string;
+  endedReason?: string;
+  durationSeconds?: number;
+  artifact?: {
+    messages?: Array<{ role: string; message?: string; content?: string }>;
+    recordingUrl?: string;
+  };
+  messages?: Array<{ role: string; message?: string; content?: string }>;
+  analysis?: { summary?: string; successEvaluation?: string };
+  summary?: string;
+  recordingUrl?: string;
+};
+
+const CALL_VOICEMAIL_RE = /audio message|leave a message|leave your message|not available|unavailable|voicemail|answering machine|at the tone|after the beep|record your message|send a message/i;
+
+// Probe Vapi directly for a call that hasn't reached a terminal state locally, and
+// self-heal: if Vapi reports it "ended", pull the transcript/summary/outcome and
+// mark it completed; otherwise advance-only sync the intermediate status. No-ops
+// for calls that are already terminal or were never dispatched to Vapi.
+export async function syncCallFromVapi(call: Call): Promise<{ call: Call; pollError: string | null }> {
+  if (!call.vapiCallId || call.status === "completed" || call.status === "failed") {
+    return { call, pollError: null };
+  }
+
+  let pollError: string | null = null;
+  const ageMs = Date.now() - new Date(call.createdAt).getTime();
+  const RINGING_TIMEOUT_MS = 5 * 60 * 1000;
+  const IN_PROGRESS_TIMEOUT_MS = 12 * 60 * 1000;
+
+  const probe = await probeVapiCall(call.vapiCallId);
+
+  if (probe.ok) {
+    const vapiData = probe.data as VapiCallDetail;
+
+    if (vapiData.status === "ended") {
+      const transcript = formatCallMessages(vapiData.artifact?.messages ?? vapiData.messages);
+      const summary = vapiData.analysis?.summary ?? (vapiData.summary as string | undefined) ?? null;
+      const endedReason = (vapiData.endedReason as string | undefined) ?? null;
+      const rawMessages = vapiData.artifact?.messages ?? vapiData.messages ?? [];
+      const transcriptHasVoicemail = rawMessages.some(
+        (m: { role: string; message?: string; content?: string }) =>
+          m.role === "user" && CALL_VOICEMAIL_RE.test(m.message ?? m.content ?? "")
+      );
+      const isVoicemailDetected = !!(endedReason && /voicemail|machine/i.test(endedReason)) || transcriptHasVoicemail;
+      const outcome = isVoicemailDetected
+        ? "no-answer"
+        : deriveCallOutcome(endedReason ?? undefined, vapiData.analysis?.successEvaluation);
+      const result = summary
+        ? summary.split(/[.\n]/).find((s: string) => s.trim().length > 10)?.trim() ?? null
+        : null;
+
+      call = await prisma.call.update({
+        where: { id: call.id },
+        data: {
+          status: "completed",
+          outcome,
+          summary,
+          transcript,
+          recordingUrl: vapiData.artifact?.recordingUrl ?? (vapiData.recordingUrl as string | undefined) ?? null,
+          durationSec: (vapiData.durationSeconds as number | undefined) ?? null,
+          endedReason,
+          result,
+        },
+      });
+    } else if (vapiData.status) {
+      // Only advance — never regress (e.g. Vapi's early "queued" state overwriting
+      // "ringing" that the dispatch route already set).
+      const currentRank = CALL_STATUS_RANK[call.status] ?? -1;
+      const newRank = CALL_STATUS_RANK[vapiData.status] ?? -1;
+      if (newRank > currentRank) {
+        call = await prisma.call.update({
+          where: { id: call.id },
+          data: { status: vapiData.status },
+        });
+      }
+    }
+  } else {
+    pollError = probe.error;
+
+    if (call.status === "ringing" && ageMs > RINGING_TIMEOUT_MS) {
+      call = await prisma.call.update({
+        where: { id: call.id },
+        data: { status: "failed", endedReason: "vapi-unreachable", outcome: "failed" },
+      });
+    } else if (call.status === "in-progress" && ageMs > IN_PROGRESS_TIMEOUT_MS) {
+      call = await prisma.call.update({
+        where: { id: call.id },
+        data: { status: "failed", endedReason: "vapi-unreachable", outcome: "failed" },
+      });
+    }
+  }
+
+  return { call, pollError };
+}
+
 // --- Ordering ------------------------------------------------------------
 
 function minDueDate(group: Invoice[]): string {
@@ -149,15 +282,20 @@ function groupTotal(group: Invoice[]): number {
 // Group eligible invoices by debtor, then order the groups per Settings.
 // overdue + asc  → most overdue (earliest due date) first.
 // amount  + desc → largest debt first.
+//
+// Groups by fuzzy business-name match (mirroring the Queue screen's own display
+// grouping in page.tsx) rather than the raw groupKey column — a single customer's
+// invoices can end up with different groupKeys (e.g. differing per-invoice ABNs),
+// and grouping by the literal column would risk splitting one customer across two
+// concurrent calls to the same phone number within a single scheduler tick.
 export function groupAndOrder(invoices: Invoice[], settings: Settings): Invoice[][] {
-  const map = new Map<string, Invoice[]>();
+  const buckets: { business: string; items: Invoice[] }[] = [];
   for (const inv of invoices) {
-    const key = inv.groupKey || computeGroupKey(inv.abn, inv.contactBusiness);
-    const arr = map.get(key);
-    if (arr) arr.push(inv);
-    else map.set(key, [inv]);
+    const existing = buckets.find((b) => companyNamesMatch(b.business, inv.contactBusiness));
+    if (existing) existing.items.push(inv);
+    else buckets.push({ business: inv.contactBusiness, items: [inv] });
   }
-  const groups = Array.from(map.values());
+  const groups = buckets.map((b) => b.items);
   const dir = settings.sortDir === "desc" ? -1 : 1;
   groups.sort((a, b) => {
     if (settings.sortField === "amount") {
@@ -204,7 +342,28 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
   const language = getVoiceLanguage(lead.voice);
   const gender = getVoiceGender(lead.voice);
 
-  const invoiceBlocks: InvoiceBlock[] = sorted.map((i) => ({
+  // Same-customer pending invoices outside this dispatch batch, matched by fuzzy
+  // business name rather than the raw groupKey column — a debtor's invoices can
+  // end up with different groupKeys (e.g. differing per-invoice ABNs) even though
+  // they're clearly the same customer, which is why the Queue screen's own display
+  // grouping (page.tsx) already fuzzy-matches by name. Already-overdue matches are
+  // folded in as full participants of this call (linked + marked calling, resolved/
+  // requeued by the webhook like the rest); not-yet-due matches stay context-only —
+  // the agent can discuss them if asked, but they aren't formally being chased yet.
+  const today = new Date().toISOString().split("T")[0];
+  const candidates = await prisma.invoice.findMany({
+    where: { status: "pending", id: { notIn: invoices.map((i) => i.id) } },
+  });
+  const sameCustomer = candidates.filter((i) => companyNamesMatch(i.contactBusiness, lead.contactBusiness));
+  const overdueExtras = sameCustomer.filter((i) => i.dueDate && i.dueDate < today);
+  const notYetDueExtras = sameCustomer.filter((i) => !overdueExtras.includes(i));
+
+  const allDispatched = [...invoices, ...overdueExtras];
+  const sortedAll = [...allDispatched].sort((a, b) =>
+    (a.dueDate ?? "9999-12-31").localeCompare(b.dueDate ?? "9999-12-31")
+  );
+
+  const invoiceBlocks: InvoiceBlock[] = sortedAll.map((i) => ({
     invoiceNumber: i.invoiceNumber ?? undefined,
     invoiceDate: i.invoiceDate ?? undefined,
     dueDate: i.dueDate ?? undefined,
@@ -214,18 +373,9 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
     invoiceNotes: i.invoiceNotes ?? undefined,
   }));
 
-  // Also include same-debtor pending invoices not yet eligible (future chaseAfter)
-  // so the agent knows about the full picture. They stay pending — not marked calling.
-  const extraInvoices = await prisma.invoice.findMany({
-    where: {
-      groupKey: lead.groupKey,
-      status: "pending",
-      id: { notIn: invoices.map((i) => i.id) },
-    },
-  });
   const allInvoiceBlocks: InvoiceBlock[] = [
     ...invoiceBlocks,
-    ...extraInvoices.map((i) => ({
+    ...notYetDueExtras.map((i) => ({
       invoiceNumber: i.invoiceNumber ?? undefined,
       invoiceDate: i.invoiceDate ?? undefined,
       dueDate: i.dueDate ?? undefined,
@@ -236,15 +386,15 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
     })),
   ];
 
-  const totalAmount = sorted.reduce((sum, i) => sum + (i.amountDue ?? 0), 0);
+  const totalAmount = sortedAll.reduce((sum, i) => sum + (i.amountDue ?? 0), 0);
   const voicemailScript = buildVoicemailMessage({
     contactBusiness: lead.contactBusiness,
     userName: lead.userName,
     invoiceNumber: lead.invoiceNumber,
-    amountDue: invoices.length > 1 ? totalAmount : lead.amountDue,
+    amountDue: allDispatched.length > 1 ? totalAmount : lead.amountDue,
     currency: lead.currency,
-    dueDate: invoices.length > 1 ? null : lead.dueDate,
-    invoiceCount: invoices.length,
+    dueDate: allDispatched.length > 1 ? null : lead.dueDate,
+    invoiceCount: allDispatched.length,
     language,
     gender,
   });
@@ -263,7 +413,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
       invoiceNumber: lead.invoiceNumber,
       invoiceDate: lead.invoiceDate,
       dueDate: lead.dueDate,
-      amountDue: invoices.length > 1 ? totalAmount : lead.amountDue,
+      amountDue: allDispatched.length > 1 ? totalAmount : lead.amountDue,
       currency: lead.currency,
       lineItems: lead.lineItems,
       invoiceNotes: lead.invoiceNotes,
@@ -280,7 +430,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
   });
 
   // 2. Link the invoices to this call and mark them calling.
-  const invoiceIds = invoices.map((i) => i.id);
+  const invoiceIds = allDispatched.map((i) => i.id);
   await prisma.invoice.updateMany({
     where: { id: { in: invoiceIds } },
     data: { status: "calling", callId: call.id, attempts: { increment: 1 } },
