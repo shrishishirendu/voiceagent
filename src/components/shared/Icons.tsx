@@ -13,6 +13,16 @@ export function IconGrid({ className = 'w-4 h-4' }: IconProps) {
   );
 }
 
+export function IconUsers({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <circle cx="7.5" cy="7" r="2.75" />
+      <path d="M3 16c0-2.5 2-4.25 4.5-4.25S12 13.5 12 16" strokeLinecap="round" />
+      <path d="M13 4.6a2.75 2.75 0 0 1 0 5.3M14.5 15.7c0-2.2-1.2-3.7-3-4.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconCalendar({ className = 'w-4 h-4' }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">

@@ -120,10 +120,11 @@ export type BulkStatus =
   | "dispatch-error"
   | "queueing"
   | "queued";
-export type BulkSource = "upload" | "drive";
+export type BulkSource = "upload" | "storage";
 
-export interface DriveInvoiceFile {
-  fileId: string;
+/** A PDF stored in the Supabase Storage invoices bucket (GET /api/files/invoices). */
+export interface StoredFile {
+  path: string;
   name: string;
   size: number | null;
   modifiedTime: string;
@@ -141,7 +142,7 @@ export interface BulkItem {
   uid: string;
   source: BulkSource;
   file?: File;
-  driveFileId?: string;
+  storagePath?: string;
   fileName: string;
   fileSize?: number | null;
   modifiedTime?: string;
@@ -206,7 +207,7 @@ export function generateInvoiceObjective(parsed: InvoiceParseResult): string {
   return parts.join(" ");
 }
 
-export function buildBulkBrief(parsed: InvoiceParseResult): Record<string, unknown> {
+export function buildBulkBrief(parsed: InvoiceParseResult, sourceFilePath?: string): Record<string, unknown> {
   return {
     contactBusiness: parsed.contactBusiness || "Accounts Payable",
     contactPerson: parsed.contactPerson ?? undefined,
@@ -229,5 +230,6 @@ export function buildBulkBrief(parsed: InvoiceParseResult): Record<string, unkno
     abn: parsed.abn ?? undefined,
     remittanceName: parsed.remittanceName ?? undefined,
     remittanceContact: parsed.remittanceContact ?? undefined,
+    sourceFilePath: sourceFilePath ?? undefined,
   };
 }

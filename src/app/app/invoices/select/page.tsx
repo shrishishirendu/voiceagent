@@ -13,7 +13,7 @@ import { useAddToast } from '@/components/shared/Toast';
 import { Button } from '@/components/shared/Button';
 import { IconCheck, IconUpload } from '@/components/shared/Icons';
 import { fmtBytes, fmtWhen } from '@/lib/format';
-import type { DriveInvoiceFile } from '@/lib/client-types';
+import type { StoredFile } from '@/lib/client-types';
 
 type UploadRow = { uid: string; file: File; selected: boolean };
 
@@ -37,7 +37,7 @@ export default function SelectInvoicePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadRow[]>([]);
 
-  const selectedDriveIds = useMemo(() => new Set(bulkItems.filter((i) => i.driveFileId).map((i) => i.driveFileId!)), [bulkItems]);
+  const selectedDriveIds = useMemo(() => new Set(bulkItems.filter((i) => i.storagePath).map((i) => i.storagePath!)), [bulkItems]);
   const selectedUploadCount = uploadedFiles.filter((f) => f.selected).length;
   const totalDispatchCount = bulkItems.length + selectedUploadCount;
   const hasDispatchable = totalDispatchCount > 0;
@@ -81,7 +81,7 @@ export default function SelectInvoicePage() {
                   tab === t ? 'bg-brand text-white' : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
-                {t === 'drive' ? 'Google Drive' : 'Upload files'}
+                {t === 'drive' ? 'Supabase' : 'Upload files'}
               </button>
             ))}
           </div>
@@ -89,7 +89,7 @@ export default function SelectInvoicePage() {
           {tab === 'drive' && (
             <div className="card">
               <div className="px-4 pt-3.5 pb-2.5 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-700">Drive invoices</h3>
+                <h3 className="text-sm font-semibold text-slate-700">Stored invoices</h3>
                 {!driveLoading && !driveError && driveFiles.length > 0 && (
                   <button
                     onClick={selectedDriveIds.size > 0 ? deselectAllDrive : selectAllDrive}
@@ -100,16 +100,16 @@ export default function SelectInvoicePage() {
                 )}
               </div>
               <div className="px-4 pb-4 space-y-2">
-                {driveLoading && <p className="text-sm text-slate-400 py-6 text-center">Loading Drive…</p>}
+                {driveLoading && <p className="text-sm text-slate-400 py-6 text-center">Loading…</p>}
                 {driveError && !driveLoading && <p className="text-sm text-red-500 py-2">{driveError}</p>}
                 {!driveLoading && !driveError && driveFiles.length === 0 && (
-                  <p className="text-sm text-slate-400 py-6 text-center">No PDF invoices found in Drive.</p>
+                  <p className="text-sm text-slate-400 py-6 text-center">No invoices in Supabase Storage yet.</p>
                 )}
-                {driveFiles.map((f: DriveInvoiceFile) => {
-                  const selected = selectedDriveIds.has(f.fileId);
+                {driveFiles.map((f: StoredFile) => {
+                  const selected = selectedDriveIds.has(f.path);
                   return (
                     <button
-                      key={f.fileId}
+                      key={f.path}
                       onClick={() => toggleDriveItem(f)}
                       className={`w-full text-left px-3.5 py-3 rounded-xl border flex items-center gap-3 transition-colors ${
                         selected ? 'border-brand/40 bg-brand-faint' : 'border-slate-100 hover:bg-slate-50'

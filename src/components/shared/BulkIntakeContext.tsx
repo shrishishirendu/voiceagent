@@ -24,7 +24,7 @@ import {
   type BulkSource,
   type BulkStatus,
   type ContactRow,
-  type DriveInvoiceFile,
+  type StoredFile,
   type InvoiceParseResult,
 } from '@/lib/client-types';
 import { CONCURRENT_CALL_LIMIT, createSemaphore, hasCallableNumber } from '@/lib/format';
@@ -34,13 +34,13 @@ interface BulkIntakeValue {
   bulkItems: BulkItem[];
   isDispatching: boolean;
 
-  driveFiles: DriveInvoiceFile[];
+  driveFiles: StoredFile[];
   driveLoading: boolean;
   driveError: string | null;
   loadDriveFiles: (force?: boolean) => Promise<void>;
 
   getBulkItemFile: (item: BulkItem) => Promise<File>;
-  toggleDriveItem: (driveFile: DriveInvoiceFile) => void;
+  toggleDriveItem: (storedFile: StoredFile) => void;
   selectAllDrive: () => void;
   deselectAllDrive: () => void;
 
@@ -116,7 +116,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
   const [reviewBulkUid, setReviewBulkUid] = useState<string | null>(null);
   const [summaryEditUid, setSummaryEditUid] = useState<string | null>(null);
   const [isDispatching, setIsDispatching] = useState(false);
-  const [driveFiles, setDriveFiles] = useState<DriveInvoiceFile[]>([]);
+  const [driveFiles, setDriveFiles] = useState<StoredFile[]>([]);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState<string | null>(null);
   const driveFilesLastFetchedRef = useRef<number>(0);
@@ -131,13 +131,13 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
       setDriveLoading(true);
       setDriveError(null);
       try {
-        const r = await fetch('/api/drive/invoices', { cache: 'no-store' });
+        const r = await fetch('/api/files/invoices', { cache: 'no-store' });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error ?? `HTTP ${r.status}`);
         setDriveFiles(data.files ?? []);
         driveFilesLastFetchedRef.current = Date.now();
       } catch (e) {
-        setDriveError(e instanceof Error ? e.message : 'Failed to load Drive files');
+        setDriveError(e instanceof Error ? e.message : 'Failed to load stored files');
       } finally {
         setDriveLoading(false);
       }
@@ -147,25 +147,39 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
 
   const getBulkItemFile = async (item: BulkItem): Promise<File> => {
     if (item.file) return item.file;
-    const r = await fetch(`/api/drive/invoice-file?fileId=${item.driveFileId}`);
+    const r = await fetch(`/api/files/invoice?path=${encodeURIComponent(item.storagePath ?? '')}`);
     if (!r.ok) throw new Error(`Failed to download ${item.fileName} (HTTP ${r.status})`);
     const blob = await r.blob();
     return new File([blob], item.fileName, { type: 'application/pdf' });
   };
 
-  const toggleDriveItem = (driveFile: DriveInvoiceFile) => {
+  // Upload a local PDF to Supabase Storage so every processed file lands in the bucket.
+  // Returns the storage path (or null on failure — non-blocking).
+  const uploadToStorage = async (file: File): Promise<string | null> => {
+    try {
+      const fd = new FormData();
+      fd.append('document', file);
+      const r = await fetch('/api/files/upload', { method: 'POST', body: fd });
+      if (!r.ok) return null;
+      return (await r.json()).path ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const toggleDriveItem = (storedFile: StoredFile) => {
     setBulkItems((prev) => {
-      const existing = prev.find((i) => i.driveFileId === driveFile.fileId);
-      if (existing) return prev.filter((i) => i.driveFileId !== driveFile.fileId);
+      const existing = prev.find((i) => i.storagePath === storedFile.path);
+      if (existing) return prev.filter((i) => i.storagePath !== storedFile.path);
       return [
         ...prev,
         {
           uid: crypto.randomUUID(),
-          source: 'drive' as BulkSource,
-          driveFileId: driveFile.fileId,
-          fileName: driveFile.name,
-          fileSize: driveFile.size,
-          modifiedTime: driveFile.modifiedTime,
+          source: 'storage' as BulkSource,
+          storagePath: storedFile.path,
+          fileName: storedFile.name,
+          fileSize: storedFile.size,
+          modifiedTime: storedFile.modifiedTime,
           status: 'parsing' as BulkStatus,
         },
       ];
@@ -174,13 +188,13 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
 
   const selectAllDrive = () => {
     setBulkItems((prev) => {
-      const existing = new Set(prev.filter((i) => i.source === 'drive').map((i) => i.driveFileId));
+      const existing = new Set(prev.filter((i) => i.source === 'storage').map((i) => i.storagePath));
       const additions: BulkItem[] = driveFiles
-        .filter((f) => !existing.has(f.fileId))
+        .filter((f) => !existing.has(f.path))
         .map((f) => ({
           uid: crypto.randomUUID(),
-          source: 'drive' as BulkSource,
-          driveFileId: f.fileId,
+          source: 'storage' as BulkSource,
+          storagePath: f.path,
           fileName: f.name,
           fileSize: f.size,
           modifiedTime: f.modifiedTime,
@@ -191,7 +205,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
   };
 
   const deselectAllDrive = () => {
-    setBulkItems((prev) => prev.filter((i) => i.source !== 'drive'));
+    setBulkItems((prev) => prev.filter((i) => i.source !== 'storage'));
   };
 
   // Pre-warm Drive file list in background so the select screen opens instantly.
@@ -309,7 +323,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
       const r = await fetch('/api/calls/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildBulkBrief(item.parsed)),
+        body: JSON.stringify(buildBulkBrief(item.parsed, item.storagePath)),
       });
       if (r.status === 429) {
         return false;
@@ -366,7 +380,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
       const r = await fetch('/api/invoices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildBulkBrief(item.parsed)),
+        body: JSON.stringify(buildBulkBrief(item.parsed, item.storagePath)),
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
@@ -387,7 +401,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
 
     let contactRows: ContactRow[] = [];
     try {
-      const cr = await fetch('/api/drive/contacts', { cache: 'no-store' });
+      const cr = await fetch('/api/contacts', { cache: 'no-store' });
       if (cr.ok) contactRows = (await cr.json()).rows ?? [];
     } catch {
       /* non-blocking */
@@ -403,6 +417,14 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
           }
           try {
             const file = await getBulkItemFile(item);
+
+            // Ensure the PDF is in Supabase Storage. Storage-source items already have a
+            // path; local uploads are uploaded now so they persist and can be linked.
+            let storagePath = item.storagePath;
+            if (item.source === 'upload' && !storagePath) {
+              storagePath = (await uploadToStorage(file)) ?? undefined;
+            }
+
             const formData = new FormData();
             formData.append('document', file);
             const r = await fetch('/api/calls/parse-document', { method: 'POST', body: formData });
@@ -419,8 +441,9 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
             if (!phone) {
               const updated: BulkItem = {
                 ...item,
+                storagePath,
                 status: 'dispatch-error',
-                error: 'No phone number found — add it to the spreadsheet',
+                error: 'No phone number found — add it in Contacts',
                 phoneSource: 'none',
                 parsed: payload,
               };
@@ -433,6 +456,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
             const wasPaused = bulkItemsRef.current.find((i) => i.uid === item.uid)?.status === 'paused';
             const resolved: BulkItem = {
               ...item,
+              storagePath,
               status: wasPaused ? 'paused' : 'parsed',
               parsed: { ...payload, toNumber: phone, contactPerson: person },
               phoneSource: sheetPhone ? 'spreadsheet' : 'pdf',
@@ -474,7 +498,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
         contactPerson: p.contactPerson ?? null,
       }));
     if (discovered.length > 0) {
-      fetch('/api/drive/contacts', {
+      fetch('/api/contacts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contacts: discovered }),
@@ -573,7 +597,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
     const r = await fetch('/api/calls/dispatch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildBulkBrief(parsed)),
+      body: JSON.stringify(buildBulkBrief(parsed, item?.storagePath)),
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
@@ -617,7 +641,7 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
       const r = await fetch('/api/calls/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildBulkBrief(parsed)),
+        body: JSON.stringify(buildBulkBrief(parsed, item?.storagePath)),
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));

@@ -35,6 +35,7 @@ const InvoiceSchema = z.object({
   abn: z.string().optional(),
   remittanceName: z.string().optional(),
   remittanceContact: z.string().optional(),
+  sourceFilePath: z.string().optional(),
 });
 
 // chaseAfter = dueDate + offsetDays (00:00 recipient-naive). No/invalid dueDate ⇒
@@ -127,6 +128,7 @@ export async function POST(req: NextRequest) {
           swiftCode: d.swiftCode,
           remittanceName: d.remittanceName,
           remittanceContact: d.remittanceContact,
+          sourceFilePath: d.sourceFilePath,
           chaseAfter,
           status: "pending",
         },

@@ -113,6 +113,9 @@ model Invoice {
   remittanceName    String? @map("remittance_name")
   remittanceContact String? @map("remittance_contact")
 
+  // Source PDF in Supabase Storage (invoices bucket), if ingested from a file
+  sourceFilePath    String?  @map("source_file_path")
+
   // Scheduling / lifecycle
   chaseAfter        DateTime @map("chase_after") @db.Timestamptz
   status            String   @default("pending") // pending | queued | calling | resolved | failed | cancelled

@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { EnvoyLogo, IsoftLogo } from '@/components/shared/Logo';
-import { IconGrid, IconPhone, IconUpload, IconCalendar, IconGear, IconChevronRight } from '@/components/shared/Icons';
+import { IconGrid, IconPhone, IconUpload, IconCalendar, IconGear, IconChevronRight, IconUsers } from '@/components/shared/Icons';
 import { SchedulerStatusPill } from './SchedulerStatusPill';
 
 const NAV = [
@@ -12,6 +12,7 @@ const NAV = [
   { id: 'calls', label: 'New Call', icon: IconPhone, href: '/app/calls/new', iconKey: 'new-call' },
   { id: 'invoices', label: 'Invoices', icon: IconUpload, href: '/app/invoices/select' },
   { id: 'queue', label: 'Queue', icon: IconCalendar, href: '/app/queue' },
+  { id: 'contacts', label: 'Contacts', icon: IconUsers, href: '/app/contacts' },
   { id: 'settings', label: 'Settings', icon: IconGear, href: '/app/settings' },
 ];
 
