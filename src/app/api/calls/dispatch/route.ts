@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { dispatchVapiCall, buildVoicemailMessage, getVoiceLanguage, getVoiceGender } from "@/lib/vapi";
+import { resolveCustomerId } from "@/lib/dispatcher";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
@@ -130,11 +131,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 1. Save the brief to DB first, so we have a row even if Vapi fails
+  // 1. Save the brief to DB first, so we have a row even if Vapi fails.
+  //    Resolve (or create) the debtor Customer so the call is linked to one.
   let call;
   try {
+    const customerId = await resolveCustomerId(prisma, {
+      abn,
+      businessName: contactBusiness,
+      contactPerson,
+      phone: normalisedNumber,
+    });
     call = await prisma.call.create({
       data: {
+        customerId,
         contactBusiness,
         contactPerson,
         toNumber: normalisedNumber,
@@ -147,7 +156,6 @@ export async function POST(req: NextRequest) {
         dueDate,
         amountDue,
         currency,
-        lineItems,
         invoiceNotes,
         bankName,
         bsb,

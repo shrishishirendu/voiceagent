@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { computeGroupKey, getSettings, normalisePhone } from "@/lib/dispatcher";
+import { computeGroupKey, getSettings, normalisePhone, parseLineItemRows } from "@/lib/dispatcher";
 
 const PatchSchema = z.object({
   contactBusiness: z.string().min(1).max(120).optional(),
@@ -79,9 +79,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       ...(d.invoiceNumber !== undefined && { invoiceNumber: d.invoiceNumber }),
       ...(d.invoiceDate !== undefined && { invoiceDate: d.invoiceDate }),
       ...(d.dueDate !== undefined && { dueDate: d.dueDate }),
-      ...(d.amountDue !== undefined && { amountDue: d.amountDue }),
+      ...(d.amountDue !== undefined && { amountDue: d.amountDue, totalAmount: d.amountDue }),
       ...(d.currency !== undefined && { currency: d.currency }),
-      ...(d.lineItems !== undefined && { lineItems: d.lineItems }),
       ...(d.invoiceNotes !== undefined && { invoiceNotes: d.invoiceNotes }),
       ...(d.bankName !== undefined && { bankName: d.bankName }),
       ...(d.bsb !== undefined && { bsb: d.bsb }),
@@ -89,9 +88,18 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
       ...(d.swiftCode !== undefined && { swiftCode: d.swiftCode }),
       ...(d.remittanceName !== undefined && { remittanceName: d.remittanceName }),
       ...(d.remittanceContact !== undefined && { remittanceContact: d.remittanceContact }),
-      ...(d.status !== undefined && { status: d.status, callId: null }),
+      ...(d.status !== undefined && { status: d.status }),
     },
   });
+
+  // Line items live in their own table — replace them wholesale when edited.
+  if (d.lineItems !== undefined) {
+    await prisma.invoiceLineItem.deleteMany({ where: { invoiceId: id } });
+    const rows = parseLineItemRows(d.lineItems);
+    if (rows.length > 0) {
+      await prisma.invoiceLineItem.createMany({ data: rows.map((r) => ({ ...r, invoiceId: id })) });
+    }
+  }
 
   return NextResponse.json(updated);
 }
@@ -104,7 +112,7 @@ export async function DELETE(_: NextRequest, { params }: { params: { id: string 
 
   await prisma.invoice.update({
     where: { id },
-    data: { status: "cancelled", callId: null },
+    data: { status: "cancelled" },
   });
 
   return NextResponse.json({ ok: true });

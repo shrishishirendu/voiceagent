@@ -2,117 +2,264 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Supabase (PostgreSQL). Prisma owns this schema — `prisma db push` reconciles it.
+// url        → pooled connection (pgbouncer, port 6543) used at runtime.
+// directUrl  → direct connection (port 5432) used for db push / DDL.
 datasource db {
-  provider = "sqlite"    
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
-model Call {
-  id              String   @id @default(cuid())
+// ─── CRM reference tables ──────────────────────────────────────────────
 
-  // Brief (set by user before dispatch)
-  contactBusiness String
-  contactPerson   String?
-  toNumber        String
-  objective       String
-  voice           String   @default("iris")
-  manner          String   @default("warm")
-  userName        String   @default("the caller")
-  invoiceNumber   String?
-  invoiceDate     String?
-  dueDate         String?
-  amountDue       Float?
-  currency        String?
-  lineItems       String?  // JSON string
-  invoiceNotes    String?
-  bankName        String?
-  bsb             String?
-  accountNumber   String?
-  swiftCode       String?
-  abn             String?
-  remittanceName  String?
-  remittanceContact String?
+model SalesPerson {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
-  // Aggregated invoices chased by this call (empty for legacy single-invoice / non-invoice calls)
-  invoices        Invoice[]
+  customers Customer[]
 
-  // Vapi state
-  vapiCallId      String?  @unique
-  status          String   @default("dispatching") // dispatching | ringing | in-progress | completed | failed
-  outcome         String?  // success | partial | failed | no-answer
-
-  // Results (filled after call ends)
-  durationSec     Int?
-  endedReason     String?
-  result          String?
-  summary         String?
-  transcript      String?  // JSON string of [{who, text}]
-  voicemailScript String?
-  recordingUrl    String?
-
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  @@map("sales_person")
 }
 
-// One row per parsed invoice / debt. Also serves as the dispatch queue:
-// the scheduler groups pending rows by groupKey into a single Call per debtor.
+model Location {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique
+  name      String
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  customers Customer[]
+
+  @@map("location")
+}
+
+// The debtor. Replaces demo3.0's denormalized contactBusiness/abn/groupKey identity.
+// The app writes businessName/abn/contactPerson/contactPhone; the remaining CRM
+// columns are kept for schema fidelity but left null/default in this phase.
+model Customer {
+  id                    String   @id @default(uuid()) @db.Uuid
+  accountCode           String?  @map("account_code")
+  businessName          String   @map("business_name")
+  addressLine           String?  @map("address_line")
+  city                  String?
+  state                 String?
+  postCode              String?  @map("post_code")
+  contactPerson         String?  @map("contact_person")
+  contactPhone          String?  @map("contact_phone")
+  email1                String?  @map("email_1")
+  email2                String?  @map("email_2")
+  abn                   String?
+  paymentTermsDays      Int?     @map("payment_terms_days")
+  deliveryInstructions  String?  @map("delivery_instructions")
+  creditLimit           Float?   @map("credit_limit")
+  ignoreMinPrice        Boolean  @default(false) @map("ignore_min_price")
+  ignoreProductMinPrice Boolean  @default(false) @map("ignore_product_min_price")
+  hideInvoice           Boolean  @default(false) @map("hide_invoice")
+  isActive              Boolean  @default(true) @map("is_active")
+  balanceAmount         Float    @default(0) @map("balance_amount")
+  salesPersonId         String?  @map("sales_person_id") @db.Uuid
+  locationId            String?  @map("location_id") @db.Uuid
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  salesPerson SalesPerson? @relation(fields: [salesPersonId], references: [id])
+  location    Location?    @relation(fields: [locationId], references: [id])
+  invoices    Invoice[]
+  calls       Call[]
+  notes       Note[]
+
+  @@map("customer")
+}
+
+// One row per parsed invoice / debt. Also serves as the dispatch queue — the
+// scheduler groups pending rows by debtor and dispatches one Call per debtor.
+// ERD invoice columns + operational scheduling columns (chaseAfter/status/attempts/
+// group_key + caller config), so the queue/scheduler can run. Money is stored as
+// double precision (Float) to preserve the app's numeric semantics; dates are text
+// (YYYY-MM-DD) to preserve the app's string-based date comparisons.
 model Invoice {
-  id              String   @id @default(cuid())
+  id                String  @id @default(uuid()) @db.Uuid
+  customerId        String? @map("customer_id") @db.Uuid
 
-  // Debtor identity (used for grouping + dialing)
-  contactBusiness String
-  contactPerson   String?
-  toNumber        String?
-  abn             String?
-  groupKey        String   // computed: abn || normalizeBusinessName(contactBusiness)
+  // Debtor identity snapshot (used for fuzzy grouping + dialing)
+  contactBusiness   String  @map("contact_business")
+  contactPerson     String? @map("contact_person")
+  toNumber          String? @map("to_number")
+  abn               String?
+  groupKey          String  @map("group_key")
 
   // Caller / call config carried from ingestion
-  userName        String   @default("the caller")
-  voice           String   @default("iris")
-  manner          String   @default("warm")
-  objective       String
+  userName          String  @default("the caller") @map("user_name")
+  voice             String  @default("iris")
+  manner            String  @default("warm")
+  objective         String
 
-  // Invoice fields (mirror of Call's invoice columns)
-  invoiceNumber   String?
-  invoiceDate     String?
-  dueDate         String?
-  amountDue       Float?
-  currency        String?
-  lineItems       String?  // JSON string
-  invoiceNotes    String?
-  bankName        String?
-  bsb             String?
-  accountNumber   String?
-  swiftCode       String?
-  remittanceName  String?
-  remittanceContact String?
+  // Invoice fields (ERD columns; amountDue → balance_amount)
+  invoiceNumber     String? @map("invoice_no")
+  invoiceDate       String? @map("invoice_date")
+  dueDate           String? @map("due_date")
+  amountDue         Float?  @map("balance_amount")
+  totalAmount       Float?  @map("total_amount")
+  paidAmount        Float?  @default(0) @map("paid_amount")
+  currency          String? @default("AUD")
+  invoiceNotes      String? @map("invoice_notes")
+  bankName          String? @map("bank_name")
+  bsb               String?
+  accountNumber     String? @map("account_number")
+  swiftCode         String? @map("swift_code")
+  remittanceName    String? @map("remittance_name")
+  remittanceContact String? @map("remittance_contact")
 
   // Scheduling / lifecycle
-  chaseAfter      DateTime // dueDate + Settings.dueOffsetDays; eligible when <= now
-  status          String   @default("pending") // pending | queued | calling | resolved | failed | cancelled
-  attempts        Int      @default(0)
-  callId          String?
-  call            Call?    @relation(fields: [callId], references: [id])
+  chaseAfter        DateTime @map("chase_after") @db.Timestamptz
+  status            String   @default("pending") // pending | queued | calling | resolved | failed | cancelled
+  attempts          Int      @default(0)
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  customer  Customer?         @relation(fields: [customerId], references: [id])
+  lineItems InvoiceLineItem[]
+  payments  Payment[]
+  callLinks CallInvoice[]
 
   @@index([status, chaseAfter])
   @@index([groupKey])
+  @@map("invoice")
 }
 
-// Singleton runtime config (one row, id = "singleton").
+model InvoiceLineItem {
+  id          String   @id @default(uuid()) @db.Uuid
+  invoiceId   String   @map("invoice_id") @db.Uuid
+  description String?
+  quantity    Float?
+  unitPrice   Float?   @map("unit_price")
+  lineTotal   Float?   @map("line_total")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("invoice_line_item")
+}
+
+model Payment {
+  id           String   @id @default(uuid()) @db.Uuid
+  invoiceId    String   @map("invoice_id") @db.Uuid
+  payAmount    Float    @default(0) @map("pay_amount")
+  creditAmount Float    @default(0) @map("credit_amount")
+  payDate      String?  @map("pay_date")
+  paymentType  String?  @map("payment_type")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("payment")
+}
+
+model Note {
+  id         String   @id @default(uuid()) @db.Uuid
+  customerId String   @map("customer_id") @db.Uuid
+  noteType   String?  @map("note_type")
+  noteText   String?  @map("note_text")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@map("note")
+}
+
+// One outbound call (may aggregate multiple invoices via CallInvoice). Keeps a
+// snapshot of the lead invoice (amountDue/currency/banking/remittance) for the
+// detail view + SMS follow-up, consistent with the ERD's contact_* snapshot cols.
+model Call {
+  id                String  @id @default(uuid()) @db.Uuid
+  customerId        String? @map("customer_id") @db.Uuid
+
+  contactBusiness   String  @map("contact_business")
+  contactPerson     String? @map("contact_person")
+  toNumber          String  @map("to_number")
+  objective         String
+  voice             String  @default("iris")
+  manner            String  @default("warm")
+  userName          String  @default("the caller") @map("user_name")
+
+  // Lead-invoice snapshot (denormalized, for Detail view / SMS)
+  invoiceNumber     String? @map("invoice_number")
+  invoiceDate       String? @map("invoice_date")
+  dueDate           String? @map("due_date")
+  amountDue         Float?  @map("amount_due")
+  currency          String?
+  invoiceNotes      String? @map("invoice_notes")
+  bankName          String? @map("bank_name")
+  bsb               String?
+  accountNumber     String? @map("account_number")
+  swiftCode         String? @map("swift_code")
+  abn               String?
+  remittanceName    String? @map("remittance_name")
+  remittanceContact String? @map("remittance_contact")
+
+  // Vapi state
+  vapiCallId        String? @unique @map("vapi_call_id")
+  status            String  @default("dispatching") // dispatching | ringing | in-progress | completed | failed
+  outcome           String? // success | partial | failed | no-answer
+
+  // Results (filled after the call ends)
+  durationSec       Int?    @map("duration_sec")
+  endedReason       String? @map("ended_reason")
+  result            String?
+  summary           String?
+  transcript        Json?   @db.JsonB
+  voicemailScript   String? @map("voicemail_script")
+  recordingUrl      String? @map("recording_url")
+
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  customer     Customer?     @relation(fields: [customerId], references: [id])
+  invoiceLinks CallInvoice[]
+
+  @@map("call")
+}
+
+// Join table: which invoices a call discusses/chases (replaces Invoice.callId).
+model CallInvoice {
+  id        String   @id @default(uuid()) @db.Uuid
+  callId    String   @map("call_id") @db.Uuid
+  invoiceId String   @map("invoice_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  call    Call    @relation(fields: [callId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@unique([callId, invoiceId])
+  @@index([callId])
+  @@index([invoiceId])
+  @@map("call_invoice")
+}
+
+// Singleton runtime config (one row, id = "singleton"). Not part of the ERD —
+// added because the scheduler needs business-hours/timezone/retry config.
 model Settings {
-  id            String  @id @default("singleton")
-  bhStartHour   Int     @default(9)            // 9am
-  bhEndHour     Int     @default(17)           // 5pm
-  bhDays        String  @default("1,2,3,4,5")  // ISO weekdays Mon-Fri
-  timezone      String  @default("Australia/Sydney")
-  dueOffsetDays Int     @default(0)            // chase dueDate + N days
-  sortField       String  @default("overdue")   // overdue | amount
-  sortDir         String  @default("asc")        // asc | desc (overdue+asc = most overdue first)
-  schedulerOn     Boolean @default(true)
-  smsEnabled      Boolean @default(false)        // send SMS follow-up after every call
-  retryDelayHours Int     @default(24)           // hours before requeuing a no-answer/failed invoice
-  autoRetry       Boolean @default(true)         // auto-requeue no-answer/failed invoices; off = stay failed for manual retry
+  id              String  @id @default("singleton")
+  bhStartHour     Int     @default(9) @map("bh_start_hour")
+  bhEndHour       Int     @default(17) @map("bh_end_hour")
+  bhDays          String  @default("1,2,3,4,5") @map("bh_days")
+  timezone        String  @default("Australia/Sydney")
+  dueOffsetDays   Int     @default(0) @map("due_offset_days")
+  sortField       String  @default("overdue") @map("sort_field")
+  sortDir         String  @default("asc") @map("sort_dir")
+  schedulerOn     Boolean @default(true) @map("scheduler_on")
+  smsEnabled      Boolean @default(false) @map("sms_enabled")
+  retryDelayHours Int     @default(24) @map("retry_delay_hours")
+  autoRetry       Boolean @default(true) @map("auto_retry")
+
+  @@map("settings")
 }

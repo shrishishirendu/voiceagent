@@ -17,7 +17,8 @@ import {
   type InvoiceBlock,
 } from "@/lib/vapi";
 import { companyNamesMatch } from "@/lib/nameUtils";
-import type { Call, Invoice, Settings } from "@prisma/client";
+import { Prisma } from "@prisma/client";
+import type { Call, Invoice, Settings, InvoiceLineItem } from "@prisma/client";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
@@ -55,6 +56,70 @@ export function normalisePhone(raw: string): string {
   if (n.startsWith("0")) return "+61" + n.slice(1);
   if (n.startsWith("61")) return "+" + n;
   return "+" + n;
+}
+
+// --- Customer resolution + line-item (de)serialisation --------------------
+
+type DbClient = Prisma.TransactionClient | typeof prisma;
+
+// Find-or-create the debtor Customer for an invoice (ABN first, fuzzy business-name
+// fallback — mirrors computeGroupKey's grouping so a debtor collapses to one row).
+export async function resolveCustomerId(
+  db: DbClient,
+  args: { abn?: string | null; businessName: string; contactPerson?: string | null; phone?: string | null }
+): Promise<string> {
+  const cleanAbn = (args.abn ?? "").replace(/\s/g, "");
+  if (cleanAbn) {
+    const byAbn = await db.customer.findFirst({ where: { abn: cleanAbn } });
+    if (byAbn) return byAbn.id;
+  }
+  const all = await db.customer.findMany({ select: { id: true, businessName: true } });
+  const match = all.find((c) => companyNamesMatch(c.businessName, args.businessName));
+  if (match) return match.id;
+  const created = await db.customer.create({
+    data: {
+      businessName: args.businessName,
+      abn: cleanAbn || null,
+      contactPerson: args.contactPerson ?? null,
+      contactPhone: args.phone ?? null,
+    },
+  });
+  return created.id;
+}
+
+// Line items are stored as InvoiceLineItem rows but the parser/prompt/UI speak a
+// JSON string of { description, quantity, unitPrice, amount }. These convert between
+// the two representations at the DB boundary.
+export function serializeLineItems(
+  rows: Pick<InvoiceLineItem, "description" | "quantity" | "unitPrice" | "lineTotal">[] | undefined
+): string | null {
+  if (!rows || rows.length === 0) return null;
+  return JSON.stringify(
+    rows.map((r) => ({
+      description: r.description ?? undefined,
+      quantity: r.quantity ?? undefined,
+      unitPrice: r.unitPrice ?? undefined,
+      amount: r.lineTotal ?? undefined,
+    }))
+  );
+}
+
+export function parseLineItemRows(
+  lineItems: string | null | undefined
+): { description: string | null; quantity: number | null; unitPrice: number | null; lineTotal: number | null }[] {
+  if (!lineItems) return [];
+  try {
+    const arr = JSON.parse(lineItems);
+    if (!Array.isArray(arr)) return [];
+    return arr.map((it: { description?: unknown; quantity?: unknown; unitPrice?: unknown; amount?: unknown; lineTotal?: unknown }) => ({
+      description: typeof it.description === "string" ? it.description : null,
+      quantity: typeof it.quantity === "number" ? it.quantity : null,
+      unitPrice: typeof it.unitPrice === "number" ? it.unitPrice : null,
+      lineTotal: typeof it.amount === "number" ? it.amount : typeof it.lineTotal === "number" ? it.lineTotal : null,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 // --- Settings singleton --------------------------------------------------
@@ -105,18 +170,21 @@ async function reapStaleCalls(): Promise<void> {
 
   // Also requeue (or permanently fail) any invoices stuck at "calling" for reaped calls.
   const settings = await getSettings();
+  const links = await prisma.callInvoice.findMany({
+    where: { callId: { in: staleIds } },
+    select: { invoiceId: true },
+  });
   const linked = await prisma.invoice.findMany({
-    where: { callId: { in: staleIds }, status: "calling" },
+    where: { id: { in: links.map((l) => l.invoiceId) }, status: "calling" },
   });
   for (const inv of linked) {
     if (!settings.autoRetry || inv.attempts >= MAX_INVOICE_ATTEMPTS) {
-      await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed", callId: null } });
+      await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed" } });
     } else {
       await prisma.invoice.update({
         where: { id: inv.id },
         data: {
           status: "pending",
-          callId: null,
           chaseAfter: new Date(Date.now() + (settings.retryDelayHours ?? 24) * 60 * 60 * 1000),
         },
       });
@@ -158,16 +226,15 @@ function deriveCallOutcome(endedReason?: string, successEval?: string): string {
   return "success";
 }
 
+// Returns a plain array for the Call.transcript jsonb column.
 function formatCallMessages(
   messages?: Array<{ role: string; message?: string; content?: string }>
-): string {
-  if (!messages?.length) return JSON.stringify([]);
-  return JSON.stringify(
-    messages
-      .filter((m) => m.role === "assistant" || m.role === "user" || m.role === "bot")
-      .map((m) => ({ who: m.role === "user" ? "them" : "envoy", text: m.message ?? m.content ?? "" }))
-      .filter((m) => m.text.length > 0)
-  );
+): { who: string; text: string }[] {
+  if (!messages?.length) return [];
+  return messages
+    .filter((m) => m.role === "assistant" || m.role === "user" || m.role === "bot")
+    .map((m) => ({ who: m.role === "user" ? "them" : "envoy", text: m.message ?? m.content ?? "" }))
+    .filter((m) => m.text.length > 0);
 }
 
 type VapiCallDetail = Record<string, unknown> & {
@@ -363,28 +430,28 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
     (a.dueDate ?? "9999-12-31").localeCompare(b.dueDate ?? "9999-12-31")
   );
 
-  const invoiceBlocks: InvoiceBlock[] = sortedAll.map((i) => ({
+  // Line items live in their own table — load them for every invoice we'll speak
+  // about (dispatched + context-only) and re-serialise to the prompt's JSON shape.
+  const involvedIds = [...sortedAll, ...notYetDueExtras].map((i) => i.id);
+  const liRows = await prisma.invoiceLineItem.findMany({ where: { invoiceId: { in: involvedIds } } });
+  const liByInvoice = new Map<string, InvoiceLineItem[]>();
+  for (const r of liRows) {
+    const list = liByInvoice.get(r.invoiceId);
+    if (list) list.push(r);
+    else liByInvoice.set(r.invoiceId, [r]);
+  }
+  const toBlock = (i: Invoice): InvoiceBlock => ({
     invoiceNumber: i.invoiceNumber ?? undefined,
     invoiceDate: i.invoiceDate ?? undefined,
     dueDate: i.dueDate ?? undefined,
     amountDue: i.amountDue ?? undefined,
     currency: i.currency ?? undefined,
-    lineItems: i.lineItems ?? undefined,
+    lineItems: serializeLineItems(liByInvoice.get(i.id)) ?? undefined,
     invoiceNotes: i.invoiceNotes ?? undefined,
-  }));
+  });
 
-  const allInvoiceBlocks: InvoiceBlock[] = [
-    ...invoiceBlocks,
-    ...notYetDueExtras.map((i) => ({
-      invoiceNumber: i.invoiceNumber ?? undefined,
-      invoiceDate: i.invoiceDate ?? undefined,
-      dueDate: i.dueDate ?? undefined,
-      amountDue: i.amountDue ?? undefined,
-      currency: i.currency ?? undefined,
-      lineItems: i.lineItems ?? undefined,
-      invoiceNotes: i.invoiceNotes ?? undefined,
-    })),
-  ];
+  const invoiceBlocks: InvoiceBlock[] = sortedAll.map(toBlock);
+  const allInvoiceBlocks: InvoiceBlock[] = [...invoiceBlocks, ...notYetDueExtras.map(toBlock)];
 
   const totalAmount = sortedAll.reduce((sum, i) => sum + (i.amountDue ?? 0), 0);
   const voicemailScript = buildVoicemailMessage({
@@ -403,6 +470,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
   //    Detail back-compat; amountDue is the aggregate total across the group.
   const call = await prisma.call.create({
     data: {
+      customerId: lead.customerId,
       contactBusiness: lead.contactBusiness,
       contactPerson: lead.contactPerson,
       toNumber,
@@ -415,7 +483,6 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
       dueDate: lead.dueDate,
       amountDue: allDispatched.length > 1 ? totalAmount : lead.amountDue,
       currency: lead.currency,
-      lineItems: lead.lineItems,
       invoiceNotes: lead.invoiceNotes,
       bankName: lead.bankName,
       bsb: lead.bsb,
@@ -429,11 +496,15 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
     },
   });
 
-  // 2. Link the invoices to this call and mark them calling.
+  // 2. Link the invoices to this call (call_invoice join) and mark them calling.
   const invoiceIds = allDispatched.map((i) => i.id);
+  await prisma.callInvoice.createMany({
+    data: invoiceIds.map((id) => ({ callId: call.id, invoiceId: id })),
+    skipDuplicates: true,
+  });
   await prisma.invoice.updateMany({
     where: { id: { in: invoiceIds } },
-    data: { status: "calling", callId: call.id, attempts: { increment: 1 } },
+    data: { status: "calling", attempts: { increment: 1 } },
   });
 
   // 3. Dispatch via Vapi.
@@ -473,10 +544,11 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
       where: { id: call.id },
       data: { status: "failed", endedReason: msg.slice(0, 500), outcome: "failed" },
     });
-    // Call never connected — return invoices to the queue for a later tick.
+    // Call never connected — unlink and return invoices to the queue for a later tick.
+    await prisma.callInvoice.deleteMany({ where: { callId: call.id } });
     await prisma.invoice.updateMany({
       where: { id: { in: invoiceIds } },
-      data: { status: "pending", callId: null, chaseAfter: new Date(Date.now() + 60 * 60 * 1000) },
+      data: { status: "pending", chaseAfter: new Date(Date.now() + 60 * 60 * 1000) },
     });
     return { ok: false, error: msg };
   }

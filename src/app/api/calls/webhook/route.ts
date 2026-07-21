@@ -60,16 +60,16 @@ function deriveOutcome(endedReason?: string, successEval?: string): string {
   return "success";
 }
 
-function formatTranscript(messages?: VapiMessage["messages"]): string {
-  if (!messages || messages.length === 0) return JSON.stringify([]);
-  const formatted = messages
+// Returns a plain array for the Call.transcript jsonb column.
+function formatTranscript(messages?: VapiMessage["messages"]): { who: string; text: string }[] {
+  if (!messages || messages.length === 0) return [];
+  return messages
     .filter((m) => m.role === "assistant" || m.role === "user" || m.role === "bot")
     .map((m) => ({
       who: m.role === "user" ? "them" : "envoy",
       text: m.message ?? m.content ?? "",
     }))
     .filter((m) => m.text.length > 0);
-  return JSON.stringify(formatted);
 }
 
 export async function POST(req: NextRequest) {
@@ -232,22 +232,26 @@ export async function POST(req: NextRequest) {
       // (chaseAfter = configurable retryDelayHours out; the business-hours gate still applies).
       // When autoRetry is off, failed/no-answer invoices are marked failed immediately instead.
       try {
+        const links = await prisma.callInvoice.findMany({
+          where: { callId: call.id },
+          select: { invoiceId: true },
+        });
+        const linkedIds = links.map((l) => l.invoiceId);
         if (outcome === "success" || outcome === "partial") {
           await prisma.invoice.updateMany({
-            where: { callId: call.id, status: "calling" },
+            where: { id: { in: linkedIds }, status: "calling" },
             data: { status: "resolved" },
           });
         } else {
-          const linked = await prisma.invoice.findMany({ where: { callId: call.id, status: "calling" } });
+          const linked = await prisma.invoice.findMany({ where: { id: { in: linkedIds }, status: "calling" } });
           for (const inv of linked) {
             if (!autoRetry || inv.attempts >= MAX_INVOICE_ATTEMPTS) {
-              await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed", callId: null } });
+              await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed" } });
             } else {
               await prisma.invoice.update({
                 where: { id: inv.id },
                 data: {
                   status: "pending",
-                  callId: null,
                   chaseAfter: new Date(Date.now() + retryDelayHours * 60 * 60 * 1000),
                 },
               });

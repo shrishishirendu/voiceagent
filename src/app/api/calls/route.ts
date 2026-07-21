@@ -18,7 +18,7 @@ export async function GET() {
       result: c.result,
       summary: c.summary,
       durationSec: c.durationSec,
-      transcript: (() => { try { return c.transcript ? JSON.parse(c.transcript) : []; } catch { return []; } })(),
+      transcript: Array.isArray(c.transcript) ? c.transcript : [],
       recordingUrl: c.recordingUrl,
       endedReason: c.endedReason ?? null,
       voicemailScript: c.voicemailScript ?? null,

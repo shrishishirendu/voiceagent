@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { computeGroupKey, getSettings, normalisePhone, syncCallFromVapi } from "@/lib/dispatcher";
+import { computeGroupKey, getSettings, normalisePhone, syncCallFromVapi, resolveCustomerId, parseLineItemRows, serializeLineItems } from "@/lib/dispatcher";
 import { companyNamesMatch } from "@/lib/nameUtils";
 
 /**
@@ -94,11 +94,20 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      const normalisedPhone = d.toNumber ? normalisePhone(d.toNumber) : null;
+      const customerId = await resolveCustomerId(tx, {
+        abn: d.abn,
+        businessName: d.contactBusiness,
+        contactPerson: d.contactPerson,
+        phone: normalisedPhone,
+      });
+
       const invoice = await tx.invoice.create({
         data: {
+          customerId,
           contactBusiness: d.contactBusiness,
           contactPerson: d.contactPerson,
-          toNumber: d.toNumber ? normalisePhone(d.toNumber) : null,
+          toNumber: normalisedPhone,
           abn: d.abn,
           groupKey: resolvedGroupKey,
           userName: d.userName,
@@ -109,8 +118,8 @@ export async function POST(req: NextRequest) {
           invoiceDate: d.invoiceDate,
           dueDate: d.dueDate,
           amountDue: d.amountDue,
+          totalAmount: d.amountDue,
           currency: d.currency,
-          lineItems: d.lineItems,
           invoiceNotes: d.invoiceNotes,
           bankName: d.bankName,
           bsb: d.bsb,
@@ -122,6 +131,15 @@ export async function POST(req: NextRequest) {
           status: "pending",
         },
       });
+
+      // Line items live in their own table.
+      const rows = parseLineItemRows(d.lineItems);
+      if (rows.length > 0) {
+        await tx.invoiceLineItem.createMany({
+          data: rows.map((r) => ({ ...r, invoiceId: invoice.id })),
+        });
+      }
+
       return { duplicate: false as const, id: invoice.id, groupKey: resolvedGroupKey, chaseAfter };
     });
 
@@ -141,21 +159,24 @@ export async function POST(req: NextRequest) {
 export async function DELETE() {
   await prisma.invoice.updateMany({
     where: { status: { in: ["pending", "queued"] } },
-    data: { status: "cancelled", callId: null },
+    data: { status: "cancelled" },
   });
 
-  // Find calling invoices whose linked call already reached a terminal state.
+  // Find calling invoices whose most recent linked call already reached a terminal state.
   const stuckCalling = await prisma.invoice.findMany({
     where: { status: "calling" },
-    include: { call: { select: { status: true } } },
+    include: { callLinks: { include: { call: { select: { status: true } } }, orderBy: { createdAt: "desc" }, take: 1 } },
   });
   const stuckIds = stuckCalling
-    .filter((i) => i.call?.status === "completed" || i.call?.status === "failed")
+    .filter((i) => {
+      const s = i.callLinks[0]?.call?.status;
+      return s === "completed" || s === "failed";
+    })
     .map((i) => i.id);
   if (stuckIds.length > 0) {
     await prisma.invoice.updateMany({
       where: { id: { in: stuckIds } },
-      data: { status: "cancelled", callId: null },
+      data: { status: "cancelled" },
     });
   }
 
@@ -177,11 +198,24 @@ export async function GET() {
     },
     orderBy: { chaseAfter: "asc" as const },
     include: {
-      call: { select: { id: true, status: true, outcome: true, vapiCallId: true, createdAt: true } },
+      lineItems: true,
+      // Most recent linked call (call_invoice join) → the queue's "call" summary.
+      callLinks: {
+        include: { call: { select: { id: true, status: true, outcome: true, vapiCallId: true, createdAt: true } } },
+        orderBy: { createdAt: "desc" as const },
+        take: 1,
+      },
     },
   };
 
   const invoices = await prisma.invoice.findMany(findArgs);
+
+  // Reshape each row back into the queue's expected JSON: flat scalar fields, the
+  // line items re-serialised to a JSON string, and a single `call` summary object.
+  const serialize = (inv: (typeof invoices)[number]) => {
+    const { lineItems, callLinks, ...rest } = inv;
+    return { ...rest, lineItems: serializeLineItems(lineItems), call: callLinks[0]?.call ?? null };
+  };
 
   // Self-heal any non-terminal linked call directly from Vapi (mirrors the Live
   // screen's poll) so the Queue screen doesn't show a stale status when the
@@ -190,7 +224,7 @@ export async function GET() {
   const staleCallIds = Array.from(
     new Set(
       invoices
-        .map((i) => i.call)
+        .map((i) => i.callLinks[0]?.call)
         .filter((c): c is NonNullable<typeof c> => !!c && !!c.vapiCallId && c.status !== "completed" && c.status !== "failed")
         .map((c) => c.id)
     )
@@ -200,8 +234,8 @@ export async function GET() {
     const staleCalls = await prisma.call.findMany({ where: { id: { in: staleCallIds } } });
     await Promise.all(staleCalls.map((c) => syncCallFromVapi(c)));
     const refreshed = await prisma.invoice.findMany(findArgs);
-    return NextResponse.json({ invoices: refreshed });
+    return NextResponse.json({ invoices: refreshed.map(serialize) });
   }
 
-  return NextResponse.json({ invoices });
+  return NextResponse.json({ invoices: invoices.map(serialize) });
 }

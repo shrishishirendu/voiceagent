@@ -17,9 +17,14 @@ export async function GET(
   call = synced.call;
   const pollError = synced.pollError;
 
-  // Invoices aggregated into this call (empty for legacy single-invoice / non-invoice calls).
-  const linkedInvoices = await prisma.invoice.findMany({
+  // Invoices aggregated into this call (via the call_invoice join; empty for
+  // manual single-invoice / non-invoice calls).
+  const links = await prisma.callInvoice.findMany({
     where: { callId: call.id },
+    select: { invoiceId: true },
+  });
+  const linkedInvoices = await prisma.invoice.findMany({
+    where: { id: { in: links.map((l) => l.invoiceId) } },
     orderBy: { dueDate: "asc" },
   });
 
@@ -33,7 +38,7 @@ export async function GET(
     result: call.result,
     summary: call.summary,
     durationSec: call.durationSec,
-    transcript: (() => { try { return call.transcript ? JSON.parse(call.transcript) : []; } catch { return []; } })(),
+    transcript: Array.isArray(call.transcript) ? call.transcript : [],
     recordingUrl: call.recordingUrl,
     endedReason: call.endedReason,
     voicemailScript: call.voicemailScript ?? null,
