@@ -11,10 +11,12 @@
 
 import "dotenv/config";
 import cron from "node-cron";
-import { runSchedulerTick } from "@/lib/dispatcher";
+import { runAllTenantsTick } from "@/lib/dispatcher";
 import { prisma } from "@/lib/prisma";
 
 // Default: every minute. Override with SCHEDULER_CRON (standard cron syntax).
+// Local-dev convenience only — in hosted/serverless environments the on-demand
+// POST /api/cron/dispatch endpoint (hit by an external scheduler) replaces this.
 const TICK_CRON = process.env.SCHEDULER_CRON ?? "* * * * *";
 
 let running = false; // guard against overlapping ticks if one runs long
@@ -23,13 +25,11 @@ async function tick(): Promise<void> {
   if (running) return;
   running = true;
   try {
-    const res = await runSchedulerTick();
-    // Stay quiet on idle ticks; only log when something happened or went wrong.
-    if (res.dispatched > 0 || res.errors?.length) {
+    const res = await runAllTenantsTick();
+    // Stay quiet on idle ticks; only log when something happened.
+    if (res.dispatched > 0) {
       console.log(
-        `[scheduler] ${new Date().toISOString()} dispatched=${res.dispatched}` +
-          (res.reason ? ` reason="${res.reason}"` : "") +
-          (res.errors ? ` errors="${res.errors.join("; ")}"` : "")
+        `[scheduler] ${new Date().toISOString()} tenants=${res.tenants} dispatched=${res.dispatched}`
       );
     }
   } catch (err) {

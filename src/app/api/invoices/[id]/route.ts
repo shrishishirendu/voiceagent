@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { computeGroupKey, getSettings, normalisePhone, parseLineItemRows } from "@/lib/dispatcher";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 const PatchSchema = z.object({
   contactBusiness: z.string().min(1).max(120).optional(),
@@ -34,6 +35,9 @@ function computeChaseAfter(dueDate: string | null | undefined, offsetDays: numbe
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
   const { id } = params;
 
   let body: unknown;
@@ -48,7 +52,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: "Invalid fields", details: parsed.error.flatten() }, { status: 400 });
   }
 
-  const existing = await prisma.invoice.findUnique({ where: { id } });
+  // id + ownerId — IDOR guard.
+  const existing = await prisma.invoice.findFirst({ where: { id, ownerId: access.ownerId } });
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const d = parsed.data;
@@ -63,7 +68,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   if (d.chaseAfter !== undefined) {
     chaseAfter = new Date(d.chaseAfter);
   } else if (d.dueDate !== undefined) {
-    const settings = await getSettings();
+    const settings = await getSettings(access.ownerId);
     chaseAfter = computeChaseAfter(d.dueDate, settings.dueOffsetDays);
   }
 
@@ -105,9 +110,12 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 }
 
 export async function DELETE(_: NextRequest, { params }: { params: { id: string } }) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
   const { id } = params;
 
-  const existing = await prisma.invoice.findUnique({ where: { id } });
+  const existing = await prisma.invoice.findFirst({ where: { id, ownerId: access.ownerId } });
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   await prisma.invoice.update({

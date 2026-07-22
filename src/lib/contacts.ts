@@ -40,16 +40,16 @@ function toRow(c: Customer): ContactRow {
 
 const cleanAbn = (abn: string | null | undefined) => (abn ?? "").replace(/\s/g, "");
 
-export async function readContacts(): Promise<ContactRow[]> {
-  const customers = await prisma.customer.findMany({ orderBy: { businessName: "asc" } });
+export async function readContacts(ownerId: string): Promise<ContactRow[]> {
+  const customers = await prisma.customer.findMany({ where: { ownerId }, orderBy: { businessName: "asc" } });
   return customers.map(toRow);
 }
 
 // Add businesses discovered during bulk parse. Creates a customer (with blank phone)
 // only when no existing customer matches by ABN or fuzzy business name — mirrors the
-// old sheet's "append missing rows" behaviour.
-export async function upsertContacts(contacts: NewContact[]): Promise<{ added: number }> {
-  const existing = await prisma.customer.findMany({ select: { id: true, businessName: true, abn: true } });
+// old sheet's "append missing rows" behaviour. Owner-scoped.
+export async function upsertContacts(ownerId: string, contacts: NewContact[]): Promise<{ added: number }> {
+  const existing = await prisma.customer.findMany({ where: { ownerId }, select: { id: true, businessName: true, abn: true } });
   let added = 0;
   for (const c of contacts) {
     if (!c.businessName) continue;
@@ -60,6 +60,7 @@ export async function upsertContacts(contacts: NewContact[]): Promise<{ added: n
     if (match) continue;
     const created = await prisma.customer.create({
       data: {
+        ownerId,
         businessName: c.businessName,
         abn: c.abn ?? null,
         contactPhone: c.phone ?? null,

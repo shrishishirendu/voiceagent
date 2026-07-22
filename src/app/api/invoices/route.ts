@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { computeGroupKey, getSettings, normalisePhone, syncCallFromVapi, resolveCustomerId, parseLineItemRows, serializeLineItems } from "@/lib/dispatcher";
 import { companyNamesMatch } from "@/lib/nameUtils";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 /**
  * Enqueue a parsed invoice for scheduled chasing.
@@ -49,6 +50,11 @@ function computeChaseAfter(dueDate: string | undefined, offsetDays: number): Dat
 }
 
 export async function POST(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+  const ownerId = access.ownerId;
+
   let body: unknown;
   try {
     body = await req.json();
@@ -65,7 +71,7 @@ export async function POST(req: NextRequest) {
   }
 
   const d = parsed.data;
-  const settings = await getSettings();
+  const settings = await getSettings(ownerId);
   const chaseAfter = computeChaseAfter(d.dueDate, settings.dueOffsetDays);
   const groupKey = computeGroupKey(d.abn, d.contactBusiness);
 
@@ -77,7 +83,7 @@ export async function POST(req: NextRequest) {
     // with different groupKeys instead of collapsing into one debtor group.
     const result = await prisma.$transaction(async (tx) => {
       const activeInvoices = await tx.invoice.findMany({
-        where: { status: { in: ["pending", "queued", "calling"] } },
+        where: { ownerId, status: { in: ["pending", "queued", "calling"] } },
         select: { groupKey: true, contactBusiness: true },
       });
       const matchedGroup = activeInvoices.find((i) =>
@@ -88,7 +94,7 @@ export async function POST(req: NextRequest) {
       // Idempotent: if an active invoice with the same number already exists for this debtor, return it.
       if (d.invoiceNumber) {
         const dup = await tx.invoice.findFirst({
-          where: { groupKey: resolvedGroupKey, invoiceNumber: d.invoiceNumber, status: { in: ["pending", "queued", "calling"] } },
+          where: { ownerId, groupKey: resolvedGroupKey, invoiceNumber: d.invoiceNumber, status: { in: ["pending", "queued", "calling"] } },
         });
         if (dup) {
           return { duplicate: true as const, id: dup.id, groupKey: resolvedGroupKey, chaseAfter: dup.chaseAfter };
@@ -97,6 +103,7 @@ export async function POST(req: NextRequest) {
 
       const normalisedPhone = d.toNumber ? normalisePhone(d.toNumber) : null;
       const customerId = await resolveCustomerId(tx, {
+        ownerId,
         abn: d.abn,
         businessName: d.contactBusiness,
         contactPerson: d.contactPerson,
@@ -105,6 +112,7 @@ export async function POST(req: NextRequest) {
 
       const invoice = await tx.invoice.create({
         data: {
+          ownerId,
           customerId,
           contactBusiness: d.contactBusiness,
           contactPerson: d.contactPerson,
@@ -159,14 +167,19 @@ export async function POST(req: NextRequest) {
 // Cancel all queued invoices (the "Clear queue" action).
 // Also cancels "calling" invoices whose call is already terminal — these are stuck due to missed webhooks.
 export async function DELETE() {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+  const ownerId = access.ownerId;
+
   await prisma.invoice.updateMany({
-    where: { status: { in: ["pending", "queued"] } },
+    where: { ownerId, status: { in: ["pending", "queued"] } },
     data: { status: "cancelled" },
   });
 
   // Find calling invoices whose most recent linked call already reached a terminal state.
   const stuckCalling = await prisma.invoice.findMany({
-    where: { status: "calling" },
+    where: { ownerId, status: "calling" },
     include: { callLinks: { include: { call: { select: { status: true } } }, orderBy: { createdAt: "desc" }, take: 1 } },
   });
   const stuckIds = stuckCalling
@@ -188,11 +201,16 @@ export async function DELETE() {
 // List queued invoices (for the Queue screen).
 // Also includes resolved/failed invoices updated today so transcript links remain visible.
 export async function GET() {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  const ownerId = access.ownerId;
+
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
 
   const findArgs = {
     where: {
+      ownerId,
       OR: [
         { status: { in: ["pending", "queued", "calling"] } },
         { status: { in: ["resolved", "failed"] }, updatedAt: { gte: startOfToday } },

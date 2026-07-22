@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { resolveAccess, unauthorized } from "@/lib/access";
 
 export async function GET() {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+
   const calls = await prisma.call.findMany({
+    where: { ownerId: access.ownerId },
     orderBy: { createdAt: "desc" },
     take: 50,
   });

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 const EXTRACTION_PROMPT = `You are extracting information from a business invoice to pre-fill a call brief. We sent this invoice to a client and are calling them to chase payment. This invoice may span multiple pages — scan all pages before responding.
 
@@ -116,6 +117,10 @@ function normaliseParsedInvoice(parsed: ParsedInvoice) {
 }
 
 export async function POST(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+
   if (!process.env.GEMINI_API_KEY) {
     return NextResponse.json({ error: "Missing GEMINI_API_KEY" }, { status: 500 });
   }

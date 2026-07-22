@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 const PatchSchema = z.object({
   businessName: z.string().min(1).max(200).optional(),
@@ -12,6 +13,10 @@ const PatchSchema = z.object({
 
 // Edit a contact (Customer). Used by the Contacts screen to fill in / fix phone numbers.
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+
   let body: unknown;
   try {
     body = await req.json();
@@ -24,7 +29,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     return NextResponse.json({ error: "Invalid fields", details: parsed.error.flatten() }, { status: 400 });
   }
 
-  const existing = await prisma.customer.findUnique({ where: { id: params.id } });
+  // id + ownerId together — IDOR guard.
+  const existing = await prisma.customer.findFirst({ where: { id: params.id, ownerId: access.ownerId } });
   if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const d = parsed.data;

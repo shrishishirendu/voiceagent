@@ -377,6 +377,7 @@ Your opening line has already been delivered: "${buildFirstMessage(userName, lan
 }
 
 interface CreateCallArgs {
+  ownerId: string; // tenant that dispatched — carried into the webhook via server.url
   toNumber: string;
   contactBusiness: string;
   contactPerson?: string;
@@ -549,9 +550,12 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
         gender,
       }),
       backgroundDenoisingEnabled: true,
-      // Webhook target on the assistant (inline assistant config)
+      // Webhook target on the assistant (inline assistant config). The tenant id is
+      // carried in the query string so an early webhook that arrives before the Call
+      // row has its vapiCallId can still resolve the owner (belt-and-suspenders — the
+      // primary resolution is call.ownerId, looked up by vapiCallId in the webhook).
       server: {
-        url: `${args.publicUrl}/api/calls/webhook`,
+        url: `${args.publicUrl}/api/calls/webhook?owner=${encodeURIComponent(args.ownerId)}`,
       },
       // For invoice calls, ask Vapi's post-call AI to produce a factual, call-specific summary.
       ...(hasInvoiceContext ? {

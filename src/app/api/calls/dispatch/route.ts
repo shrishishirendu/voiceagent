@@ -3,6 +3,8 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { dispatchVapiCall, buildVoicemailMessage, getVoiceLanguage, getVoiceGender } from "@/lib/vapi";
 import { resolveCustomerId } from "@/lib/dispatcher";
+import { createTicket } from "@/lib/tickets";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
@@ -48,6 +50,11 @@ const BriefSchema = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+  const ownerId = access.ownerId;
+
   let body: unknown;
   try {
     body = await req.json();
@@ -112,6 +119,7 @@ export async function POST(req: NextRequest) {
   const STALE_MS = 15 * 60 * 1000;
   await prisma.call.updateMany({
     where: {
+      ownerId,
       status: { in: ["dispatching", "ringing", "in-progress"] },
       createdAt: { lte: new Date(Date.now() - STALE_MS) },
     },
@@ -120,6 +128,7 @@ export async function POST(req: NextRequest) {
 
   const activeCount = await prisma.call.count({
     where: {
+      ownerId,
       status: { in: ACTIVE_STATUSES },
       createdAt: { gte: new Date(Date.now() - ACTIVE_CUTOFF_MS) },
     },
@@ -136,6 +145,7 @@ export async function POST(req: NextRequest) {
   let call;
   try {
     const customerId = await resolveCustomerId(prisma, {
+      ownerId,
       abn,
       businessName: contactBusiness,
       contactPerson,
@@ -143,6 +153,7 @@ export async function POST(req: NextRequest) {
     });
     call = await prisma.call.create({
       data: {
+        ownerId,
         customerId,
         contactBusiness,
         contactPerson,
@@ -173,9 +184,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Failed to create call record" }, { status: 500 });
   }
 
+  // 1b. Create the outbound Ticket for this manual call (EnvoyIn-shaped, tagged
+  //     "outbound"). Mirrors the scheduler path in dispatcher.dispatchInvoiceGroup.
+  await createTicket(ownerId, {
+    customerId: call.customerId,
+    callId: call.id,
+    channel: "phone",
+    status: "In Progress",
+    title: `Outbound call — ${contactBusiness}`,
+    requester: contactBusiness,
+    tags: ["outbound"],
+  });
+
   // 2. Dispatch via Vapi
   try {
     const vapiCall = await dispatchVapiCall({
+      ownerId,
       toNumber: normalisedNumber,
       contactBusiness,
       contactPerson,

@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { syncCallFromVapi } from "@/lib/dispatcher";
+import { resolveAccess, unauthorized } from "@/lib/access";
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  let call = await prisma.call.findUnique({ where: { id: params.id } });
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+
+  // Filter by both id AND ownerId — the IDOR guard.
+  let call = await prisma.call.findFirst({ where: { id: params.id, ownerId: access.ownerId } });
   if (!call) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -24,7 +29,7 @@ export async function GET(
     select: { invoiceId: true },
   });
   const linkedInvoices = await prisma.invoice.findMany({
-    where: { id: { in: links.map((l) => l.invoiceId) } },
+    where: { id: { in: links.map((l) => l.invoiceId) }, ownerId: access.ownerId },
     orderBy: { dueDate: "asc" },
   });
 

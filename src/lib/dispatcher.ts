@@ -17,6 +17,7 @@ import {
   type InvoiceBlock,
 } from "@/lib/vapi";
 import { companyNamesMatch } from "@/lib/nameUtils";
+import { createTicket } from "@/lib/tickets";
 import { Prisma } from "@prisma/client";
 import type { Call, Invoice, Settings, InvoiceLineItem } from "@prisma/client";
 
@@ -66,18 +67,20 @@ type DbClient = Prisma.TransactionClient | typeof prisma;
 // fallback — mirrors computeGroupKey's grouping so a debtor collapses to one row).
 export async function resolveCustomerId(
   db: DbClient,
-  args: { abn?: string | null; businessName: string; contactPerson?: string | null; phone?: string | null }
+  args: { ownerId: string; abn?: string | null; businessName: string; contactPerson?: string | null; phone?: string | null }
 ): Promise<string> {
   const cleanAbn = (args.abn ?? "").replace(/\s/g, "");
   if (cleanAbn) {
-    const byAbn = await db.customer.findFirst({ where: { abn: cleanAbn } });
+    const byAbn = await db.customer.findFirst({ where: { ownerId: args.ownerId, abn: cleanAbn } });
     if (byAbn) return byAbn.id;
   }
-  const all = await db.customer.findMany({ select: { id: true, businessName: true } });
+  // Fuzzy name match is scoped to THIS tenant's customers only.
+  const all = await db.customer.findMany({ where: { ownerId: args.ownerId }, select: { id: true, businessName: true } });
   const match = all.find((c) => companyNamesMatch(c.businessName, args.businessName));
   if (match) return match.id;
   const created = await db.customer.create({
     data: {
+      ownerId: args.ownerId,
       businessName: args.businessName,
       abn: cleanAbn || null,
       contactPerson: args.contactPerson ?? null,
@@ -85,6 +88,25 @@ export async function resolveCustomerId(
     },
   });
   return created.id;
+}
+
+// Backfill the debtor Customer from a resolved Call (1E). Fills in contact fields
+// that are still empty on the Customer using what the call carried (person/phone/abn),
+// so a customer first seen via an outbound call gets its CRM row fleshed out. Owner-
+// scoped and non-destructive — never overwrites a value the Customer already has.
+export async function backfillCustomerFromCall(ownerId: string, callId: string): Promise<void> {
+  const call = await prisma.call.findFirst({ where: { id: callId, ownerId } });
+  if (!call?.customerId) return;
+  const customer = await prisma.customer.findFirst({ where: { id: call.customerId, ownerId } });
+  if (!customer) return;
+
+  const patch: { contactPerson?: string; contactPhone?: string; abn?: string } = {};
+  if (!customer.contactPerson && call.contactPerson) patch.contactPerson = call.contactPerson;
+  if (!customer.contactPhone && call.toNumber) patch.contactPhone = call.toNumber;
+  if (!customer.abn && call.abn) patch.abn = call.abn.replace(/\s/g, "");
+  if (Object.keys(patch).length === 0) return;
+
+  await prisma.customer.update({ where: { id: customer.id }, data: patch });
 }
 
 // Line items are stored as InvoiceLineItem rows but the parser/prompt/UI speak a
@@ -122,12 +144,12 @@ export function parseLineItemRows(
   }
 }
 
-// --- Settings singleton --------------------------------------------------
+// --- Settings (per-tenant) -----------------------------------------------
 
-export async function getSettings(): Promise<Settings> {
+export async function getSettings(ownerId: string): Promise<Settings> {
   return prisma.settings.upsert({
-    where: { id: "singleton" },
-    create: { id: "singleton" },
+    where: { ownerId },
+    create: { ownerId },
     update: {},
   });
 }
@@ -154,10 +176,10 @@ export function isWithinBusinessHours(now: Date, s: Settings): boolean {
 
 // --- Concurrency gate (mirror of dispatch route L107-131) ----------------
 
-async function reapStaleCalls(): Promise<void> {
+async function reapStaleCalls(ownerId: string): Promise<void> {
   const staleThreshold = new Date(Date.now() - STALE_MS);
   const staleCalls = await prisma.call.findMany({
-    where: { status: { in: ACTIVE_STATUSES }, createdAt: { lte: staleThreshold } },
+    where: { ownerId, status: { in: ACTIVE_STATUSES }, createdAt: { lte: staleThreshold } },
     select: { id: true },
   });
   if (staleCalls.length === 0) return;
@@ -169,13 +191,13 @@ async function reapStaleCalls(): Promise<void> {
   });
 
   // Also requeue (or permanently fail) any invoices stuck at "calling" for reaped calls.
-  const settings = await getSettings();
+  const settings = await getSettings(ownerId);
   const links = await prisma.callInvoice.findMany({
     where: { callId: { in: staleIds } },
     select: { invoiceId: true },
   });
   const linked = await prisma.invoice.findMany({
-    where: { id: { in: links.map((l) => l.invoiceId) }, status: "calling" },
+    where: { id: { in: links.map((l) => l.invoiceId) }, ownerId, status: "calling" },
   });
   for (const inv of linked) {
     if (!settings.autoRetry || inv.attempts >= MAX_INVOICE_ATTEMPTS) {
@@ -192,10 +214,11 @@ async function reapStaleCalls(): Promise<void> {
   }
 }
 
-export async function freeCallSlots(): Promise<number> {
-  await reapStaleCalls();
+export async function freeCallSlots(ownerId: string): Promise<number> {
+  await reapStaleCalls(ownerId);
   const active = await prisma.call.count({
     where: {
+      ownerId,
       status: { in: ACTIVE_STATUSES },
       createdAt: { gte: new Date(Date.now() - ACTIVE_CUTOFF_MS) },
     },
@@ -390,7 +413,9 @@ export type DispatchResult =
   | { ok: true; callId: string; vapiCallId?: string }
   | { ok: false; error: string };
 
-export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<DispatchResult> {
+// All invoices in `invoices` must belong to `ownerId` (the caller — a per-tenant
+// scheduler tick or an owner-scoped API route — guarantees this).
+export async function dispatchInvoiceGroup(ownerId: string, invoices: Invoice[]): Promise<DispatchResult> {
   if (invoices.length === 0) return { ok: false, error: "empty group" };
 
   const missing = requiredEnv();
@@ -419,7 +444,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
   // the agent can discuss them if asked, but they aren't formally being chased yet.
   const today = new Date().toISOString().split("T")[0];
   const candidates = await prisma.invoice.findMany({
-    where: { status: "pending", id: { notIn: invoices.map((i) => i.id) } },
+    where: { ownerId, status: "pending", id: { notIn: invoices.map((i) => i.id) } },
   });
   const sameCustomer = candidates.filter((i) => companyNamesMatch(i.contactBusiness, lead.contactBusiness));
   const overdueExtras = sameCustomer.filter((i) => i.dueDate && i.dueDate < today);
@@ -470,6 +495,7 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
   //    Detail back-compat; amountDue is the aggregate total across the group.
   const call = await prisma.call.create({
     data: {
+      ownerId,
       customerId: lead.customerId,
       contactBusiness: lead.contactBusiness,
       contactPerson: lead.contactPerson,
@@ -507,10 +533,24 @@ export async function dispatchInvoiceGroup(invoices: Invoice[]): Promise<Dispatc
     data: { status: "calling", attempts: { increment: 1 } },
   });
 
+  // 2b. Create the outbound Ticket for this call (EnvoyIn-shaped work item, tagged
+  //     "outbound"). The webhook flips it to Resolved and fills transcript/summary
+  //     on the end-of-call report (see calls/webhook + lib/tickets getTicketByCallId).
+  await createTicket(ownerId, {
+    customerId: lead.customerId,
+    callId: call.id,
+    channel: "phone",
+    status: "In Progress",
+    title: `Outbound call — ${lead.contactBusiness}`,
+    requester: lead.contactBusiness,
+    tags: ["outbound"],
+  });
+
   // 3. Dispatch via Vapi.
   console.log(`[dispatcher] dialing ${lead.contactBusiness} → ${toNumber} (call ${call.id})`);
   try {
     const vapiCall = await dispatchVapiCall({
+      ownerId,
       toNumber,
       contactBusiness: lead.contactBusiness,
       contactPerson: lead.contactPerson ?? undefined,
@@ -562,18 +602,23 @@ export interface TickResult {
   errors?: string[];
 }
 
-export async function runSchedulerTick(opts: { ignoreBusinessHours?: boolean } = {}): Promise<TickResult> {
-  const settings = await getSettings();
+// One tick for a SINGLE tenant. All queries are scoped to `ownerId`, so each
+// tenant's business hours, concurrency, and queue are honoured independently.
+export async function runSchedulerTick(
+  ownerId: string,
+  opts: { ignoreBusinessHours?: boolean } = {}
+): Promise<TickResult> {
+  const settings = await getSettings(ownerId);
   if (!settings.schedulerOn) return { dispatched: 0, reason: "scheduler off" };
   if (!opts.ignoreBusinessHours && !isWithinBusinessHours(new Date(), settings)) {
     return { dispatched: 0, reason: "outside business hours" };
   }
 
-  const slots = await freeCallSlots();
+  const slots = await freeCallSlots(ownerId);
   if (slots <= 0) return { dispatched: 0, reason: "no free call slots" };
 
   const eligible = await prisma.invoice.findMany({
-    where: { status: "pending", chaseAfter: { lte: new Date() } },
+    where: { ownerId, status: "pending", chaseAfter: { lte: new Date() } },
   });
   if (eligible.length === 0) return { dispatched: 0, reason: "no eligible invoices" };
 
@@ -582,9 +627,31 @@ export async function runSchedulerTick(opts: { ignoreBusinessHours?: boolean } =
   const errors: string[] = [];
   for (const group of groups) {
     if (dispatched >= slots) break;
-    const res = await dispatchInvoiceGroup(group);
+    const res = await dispatchInvoiceGroup(ownerId, group);
     if (res.ok) dispatched++;
     else errors.push(res.error);
   }
   return { dispatched, errors: errors.length ? errors : undefined };
+}
+
+// One tick across ALL tenants that currently have pending, due invoices. This is what
+// the on-demand cron endpoint (POST /api/cron/dispatch) and the local scheduler worker
+// call — instead of an always-on per-tenant loop, we wake up, find who has work, and
+// run each tenant's own tick. Serverless-friendly (nothing runs between invocations).
+export async function runAllTenantsTick(
+  opts: { ignoreBusinessHours?: boolean } = {}
+): Promise<{ tenants: number; dispatched: number; perTenant: Record<string, TickResult> }> {
+  const rows = await prisma.invoice.findMany({
+    where: { status: "pending", chaseAfter: { lte: new Date() } },
+    distinct: ["ownerId"],
+    select: { ownerId: true },
+  });
+  const perTenant: Record<string, TickResult> = {};
+  let dispatched = 0;
+  for (const { ownerId } of rows) {
+    const res = await runSchedulerTick(ownerId, opts);
+    perTenant[ownerId] = res;
+    dispatched += res.dispatched;
+  }
+  return { tenants: rows.length, dispatched, perTenant };
 }

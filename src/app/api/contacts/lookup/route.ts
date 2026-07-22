@@ -1,12 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { companyNamesMatch } from "@/lib/nameUtils";
+import { resolveAccess, unauthorized } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 
 // Resolve a debtor phone number. Priority: a previously-ingested invoice with the
 // same number → a fuzzy business-name match against the customer (contacts) table.
 export async function GET(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  const ownerId = access.ownerId;
+
   const { searchParams } = new URL(req.url);
   const contactBusiness = searchParams.get("contactBusiness")?.trim() ?? "";
   const invoiceNumber = searchParams.get("invoiceNumber")?.trim() ?? "";
@@ -21,7 +26,7 @@ export async function GET(req: NextRequest) {
   // (1) Invoice number — same document re-uploaded.
   if (invoiceNumber) {
     const inv = await prisma.invoice.findFirst({
-      where: { invoiceNumber },
+      where: { ownerId, invoiceNumber },
       orderBy: { createdAt: "desc" },
       include: { customer: { select: { contactPhone: true } } },
     });
@@ -32,7 +37,7 @@ export async function GET(req: NextRequest) {
   // (2) contactBusiness — fuzzy business-name match against the customer table.
   if (contactBusiness) {
     const customers = await prisma.customer.findMany({
-      where: { contactPhone: { not: null } },
+      where: { ownerId, contactPhone: { not: null } },
       select: { businessName: true, contactPhone: true },
       take: 1000,
     });

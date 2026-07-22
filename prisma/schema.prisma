@@ -15,24 +15,29 @@ datasource db {
 
 model SalesPerson {
   id        String   @id @default(uuid()) @db.Uuid
+  ownerId   String   @map("owner_id") // tenant = lowercased email
   name      String
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   customers Customer[]
 
+  @@index([ownerId])
   @@map("sales_person")
 }
 
 model Location {
   id        String   @id @default(uuid()) @db.Uuid
-  code      String   @unique
+  ownerId   String   @map("owner_id") // tenant = lowercased email
+  code      String
   name      String
   isActive  Boolean  @default(true) @map("is_active")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   customers Customer[]
 
+  @@unique([ownerId, code])
+  @@index([ownerId])
   @@map("location")
 }
 
@@ -41,6 +46,7 @@ model Location {
 // columns are kept for schema fidelity but left null/default in this phase.
 model Customer {
   id                    String   @id @default(uuid()) @db.Uuid
+  ownerId               String   @map("owner_id") // tenant = lowercased email
   accountCode           String?  @map("account_code")
   businessName          String   @map("business_name")
   addressLine           String?  @map("address_line")
@@ -70,7 +76,9 @@ model Customer {
   invoices    Invoice[]
   calls       Call[]
   notes       Note[]
+  tickets     Ticket[]
 
+  @@index([ownerId])
   @@map("customer")
 }
 
@@ -82,6 +90,7 @@ model Customer {
 // (YYYY-MM-DD) to preserve the app's string-based date comparisons.
 model Invoice {
   id                String  @id @default(uuid()) @db.Uuid
+  ownerId           String  @map("owner_id") // tenant = lowercased email
   customerId        String? @map("customer_id") @db.Uuid
 
   // Debtor identity snapshot (used for fuzzy grouping + dialing)
@@ -129,7 +138,7 @@ model Invoice {
   payments  Payment[]
   callLinks CallInvoice[]
 
-  @@index([status, chaseAfter])
+  @@index([ownerId, status, chaseAfter])
   @@index([groupKey])
   @@map("invoice")
 }
@@ -151,6 +160,7 @@ model InvoiceLineItem {
 
 model Payment {
   id           String   @id @default(uuid()) @db.Uuid
+  ownerId      String   @map("owner_id") // tenant = lowercased email
   invoiceId    String   @map("invoice_id") @db.Uuid
   payAmount    Float    @default(0) @map("pay_amount")
   creditAmount Float    @default(0) @map("credit_amount")
@@ -161,12 +171,14 @@ model Payment {
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
+  @@index([ownerId])
   @@index([invoiceId])
   @@map("payment")
 }
 
 model Note {
   id         String   @id @default(uuid()) @db.Uuid
+  ownerId    String   @map("owner_id") // tenant = lowercased email
   customerId String   @map("customer_id") @db.Uuid
   noteType   String?  @map("note_type")
   noteText   String?  @map("note_text")
@@ -175,6 +187,7 @@ model Note {
 
   customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
+  @@index([ownerId])
   @@index([customerId])
   @@map("note")
 }
@@ -184,6 +197,7 @@ model Note {
 // detail view + SMS follow-up, consistent with the ERD's contact_* snapshot cols.
 model Call {
   id                String  @id @default(uuid()) @db.Uuid
+  ownerId           String  @map("owner_id") // tenant = lowercased email
   customerId        String? @map("customer_id") @db.Uuid
 
   contactBusiness   String  @map("contact_business")
@@ -228,8 +242,43 @@ model Call {
 
   customer     Customer?     @relation(fields: [customerId], references: [id])
   invoiceLinks CallInvoice[]
+  tickets      Ticket[]
 
+  @@index([ownerId, status])
   @@map("call")
+}
+
+// One outbound ticket per Call (EnvoyIn-shaped: mirrors envoyin's `tickets` table so a
+// later merge is a schema union, not a translation). Unlike EnvoyIn's tickets — which
+// only have a free-text `requester` — this carries a real `customerId` FK to the CRM
+// Customer (requirement B) and a `callId` link to the outbound Call it represents.
+model Ticket {
+  id         String   @id @default(uuid()) @db.Uuid
+  ownerId    String   @map("owner_id") // tenant = lowercased email
+  customerId String?  @map("customer_id") @db.Uuid
+  callId     String?  @map("call_id") @db.Uuid
+  title      String?
+  requester  String? // free-text (matches EnvoyIn); business name for outbound
+  channel    String   @default("phone")
+  status     String   @default("Incoming") // Incoming | In Progress | Resolved
+  triage     Json?    @db.JsonB
+  aiSummary  String?  @map("ai_summary")
+  body       String?
+  transcript Json?    @db.JsonB
+  tags       Json     @default("[]") @db.JsonB // includes "outbound" / "inbound"
+  messages   Json     @default("[]") @db.JsonB
+  notes      Json     @default("[]") @db.JsonB
+  payment    Json     @default("{}") @db.JsonB
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  customer Customer? @relation(fields: [customerId], references: [id])
+  call     Call?     @relation(fields: [callId], references: [id])
+
+  @@index([ownerId, status])
+  @@index([customerId])
+  @@index([callId])
+  @@map("ticket")
 }
 
 // Join table: which invoices a call discusses/chases (replaces Invoice.callId).
@@ -248,10 +297,11 @@ model CallInvoice {
   @@map("call_invoice")
 }
 
-// Singleton runtime config (one row, id = "singleton"). Not part of the ERD —
-// added because the scheduler needs business-hours/timezone/retry config.
+// Per-tenant runtime config (one row per owner). Was a global singleton
+// (id = "singleton") before multi-tenancy — now keyed by ownerId. Holds the
+// scheduler's business-hours/timezone/retry config. `getSettings(ownerId)` upserts it.
 model Settings {
-  id              String  @id @default("singleton")
+  ownerId         String  @id @map("owner_id") // tenant = lowercased email
   bhStartHour     Int     @default(9) @map("bh_start_hour")
   bhEndHour       Int     @default(17) @map("bh_end_hour")
   bhDays          String  @default("1,2,3,4,5") @map("bh_days")
@@ -265,4 +315,71 @@ model Settings {
   autoRetry       Boolean @default(true) @map("auto_retry")
 
   @@map("settings")
+}
+
+// ─── Tenancy & auth ────────────────────────────────────────────────────
+
+// Per-tenant profile/config blob — the analogue of EnvoyIn's `app_config` row.
+// Holds everything that has no natural relational home: business identity +
+// onboarding state + call-moment rules + delivery address (`data`), the tenant's
+// outbound caller-id (`phoneNumber`, one number per business), the member list
+// (`members`), forecasting history, and (Phase 3) per-tenant outbound credentials.
+// New-owner detection = "does a Tenant row exist for this ownerId" (page-level check).
+model Tenant {
+  ownerId         String   @id @map("owner_id") // lowercased email
+  businessName    String?  @map("business_name")
+  phoneNumber     String?  @unique @map("phone_number") // per-business outbound caller-id
+  data            Json     @default("{}") @db.JsonB
+  members         Json     @default("[]") @db.JsonB
+  forecastHistory Json     @default("[]") @db.JsonB @map("forecast_history")
+  credentials     Json?    @db.JsonB
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  @@map("tenant")
+}
+
+// NextAuth adapter tables (JWT strategy — no Session table). `User.id` is the
+// lowercased email, forced by the Prisma auth adapter, so it doubles as `ownerId`
+// everywhere — matching EnvoyIn's "owner_id = lowercased email" identity model.
+model User {
+  id            String    @id // = lowercased email
+  email         String    @unique
+  name          String?
+  image         String?
+  emailVerified DateTime? @map("email_verified") @db.Timestamptz
+
+  accounts Account[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime @db.Timestamptz
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
 }

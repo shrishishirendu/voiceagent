@@ -37,6 +37,12 @@ function safeName(name: string): string {
   return base.toLowerCase().endsWith(".pdf") ? base : `${base}.pdf`;
 }
 
+// Every tenant's files live under a `<ownerId>/` prefix so one tenant can't list or
+// download another's PDFs. ownerId (a lowercased email) is made key-safe here.
+function ownerPrefix(ownerId: string): string {
+  return ownerId.replace(/[^\w.\-@]/g, "_");
+}
+
 // Create the (private) bucket if it doesn't already exist. Used by setup + migration.
 export async function ensureInvoiceBucket(): Promise<void> {
   const supabase = getClient();
@@ -48,23 +54,30 @@ export async function ensureInvoiceBucket(): Promise<void> {
   if (error && !/exists/i.test(error.message)) throw error;
 }
 
-export async function listInvoiceFiles(): Promise<StoredFile[]> {
+export async function listInvoiceFiles(ownerId: string): Promise<StoredFile[]> {
   const supabase = getClient();
+  const prefix = ownerPrefix(ownerId);
   const { data, error } = await supabase.storage
     .from(getBucket())
-    .list("", { limit: 1000, sortBy: { column: "updated_at", order: "desc" } });
+    .list(prefix, { limit: 1000, sortBy: { column: "updated_at", order: "desc" } });
   if (error) throw error;
   return (data ?? [])
     .filter((o) => o.name.toLowerCase().endsWith(".pdf"))
     .map((o) => ({
-      path: o.name,
+      // path is the FULL key (prefix included) so downloads round-trip correctly.
+      path: `${prefix}/${o.name}`,
       name: o.name,
       size: (o.metadata?.size as number | undefined) ?? null,
       modifiedTime: o.updated_at ?? o.created_at ?? new Date().toISOString(),
     }));
 }
 
-export async function downloadInvoiceFile(path: string): Promise<Buffer> {
+export async function downloadInvoiceFile(ownerId: string, path: string): Promise<Buffer> {
+  const prefix = ownerPrefix(ownerId);
+  // IDOR guard: refuse to serve a key that isn't under this tenant's prefix.
+  if (path !== prefix && !path.startsWith(`${prefix}/`)) {
+    throw new Error("Forbidden: file does not belong to this tenant");
+  }
   const supabase = getClient();
   const { data, error } = await supabase.storage.from(getBucket()).download(path);
   if (error) throw error;
@@ -72,15 +85,16 @@ export async function downloadInvoiceFile(path: string): Promise<Buffer> {
   return Buffer.from(arrayBuffer);
 }
 
-// Store a PDF and return its storage path. Idempotent on name (upsert overwrites),
-// so re-running the Drive migration doesn't create duplicates.
+// Store a PDF under the tenant's prefix and return its full storage path. Idempotent
+// on name (upsert overwrites), so re-uploading the same file doesn't create duplicates.
 export async function uploadInvoiceFile(
+  ownerId: string,
   name: string,
   body: Buffer,
   contentType = "application/pdf"
 ): Promise<string> {
   const supabase = getClient();
-  const path = safeName(name);
+  const path = `${ownerPrefix(ownerId)}/${safeName(name)}`;
   const { error } = await supabase.storage
     .from(getBucket())
     .upload(path, body, { contentType, upsert: true });

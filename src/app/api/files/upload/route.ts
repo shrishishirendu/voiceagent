@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { uploadInvoiceFile } from "@/lib/storage";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,10 @@ function missingEnv(): string | null {
 // Upload a PDF into the invoices bucket. Used by the upload flow so every processed
 // file also lands in Supabase Storage. Returns the storage path.
 export async function POST(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+
   const missing = missingEnv();
   if (missing) {
     return NextResponse.json({ error: `Server configuration error: ${missing} is not set.` }, { status: 500 });
@@ -38,7 +43,7 @@ export async function POST(req: NextRequest) {
 
   try {
     const buffer = Buffer.from(await file.arrayBuffer());
-    const path = await uploadInvoiceFile(file.name, buffer);
+    const path = await uploadInvoiceFile(access.ownerId, file.name, buffer);
     return NextResponse.json({ path });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";

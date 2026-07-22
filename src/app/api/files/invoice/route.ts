@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { downloadInvoiceFile } from "@/lib/storage";
+import { resolveAccess, unauthorized } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +13,9 @@ function missingEnv(): string | null {
 // Proxy a PDF out of the private Supabase Storage bucket so the bucket stays
 // private and the service-role key never reaches the browser.
 export async function GET(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+
   const missing = missingEnv();
   if (missing) {
     return NextResponse.json({ error: `Server configuration error: ${missing} is not set.` }, { status: 500 });
@@ -23,7 +27,8 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const buffer = await downloadInvoiceFile(path);
+    // downloadInvoiceFile enforces the path is under this tenant's prefix (IDOR guard).
+    const buffer = await downloadInvoiceFile(access.ownerId, path);
     return new NextResponse(new Uint8Array(buffer), {
       headers: {
         "Content-Type": "application/pdf",

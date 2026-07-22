@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { getSettings } from "@/lib/dispatcher";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
-/** Read / update the singleton scheduler Settings row. */
+/** Read / update the signed-in tenant's scheduler Settings row. */
 
 export async function GET() {
-  return NextResponse.json(await getSettings());
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  return NextResponse.json(await getSettings(access.ownerId));
 }
 
 const SettingsSchema = z.object({
@@ -24,6 +27,10 @@ const SettingsSchema = z.object({
 });
 
 export async function PUT(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "admin")) return forbidden();
+
   let body: unknown;
   try {
     body = await req.json();
@@ -43,8 +50,8 @@ export async function PUT(req: NextRequest) {
   }
 
   const updated = await prisma.settings.upsert({
-    where: { id: "singleton" },
-    create: { id: "singleton", ...parsed.data },
+    where: { ownerId: access.ownerId },
+    create: { ownerId: access.ownerId, ...parsed.data },
     update: parsed.data,
   });
   return NextResponse.json(updated);

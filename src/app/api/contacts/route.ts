@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { readContacts, upsertContacts } from "@/lib/contacts";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
   try {
-    const rows = await readContacts();
+    const rows = await readContacts(access.ownerId);
     return NextResponse.json({ rows });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
@@ -31,6 +34,10 @@ const PostBodySchema = z.union([
 ]);
 
 export async function POST(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+
   let body: unknown;
   try {
     body = await req.json();
@@ -46,7 +53,7 @@ export async function POST(req: NextRequest) {
   const contacts = "contacts" in parsed.data ? parsed.data.contacts : [parsed.data];
 
   try {
-    const result = await upsertContacts(contacts);
+    const result = await upsertContacts(access.ownerId, contacts);
     return NextResponse.json(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";

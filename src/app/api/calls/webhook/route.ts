@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { MAX_INVOICE_ATTEMPTS, getSettings } from "@/lib/dispatcher";
+import { MAX_INVOICE_ATTEMPTS, getSettings, backfillCustomerFromCall } from "@/lib/dispatcher";
+import { getTicketByCallId, updateTicket } from "@/lib/tickets";
 import { sendPostCallSms } from "@/lib/sms";
 
 /**
@@ -95,16 +96,22 @@ export async function POST(req: NextRequest) {
 
   const vapiCallId = msg.call.id;
 
+  // Tenant carried in the webhook URL (?owner=<ownerId>) by vapi.ts — used only to
+  // scope the unbound-call fallback below so an early event can't bind to another
+  // tenant's in-flight call. The authoritative tenant is call.ownerId once matched.
+  const ownerHint = req.nextUrl.searchParams.get("owner");
+
   // Find our local call record
   let call;
   try {
     call = await prisma.call.findUnique({ where: { vapiCallId } });
     // Race: vapiCallId may arrive before the dispatch route writes it.
     // Attempt to bind this event to the most recent unbound in-flight call (within 2 min).
-    // Safe under MAX_CONCURRENT_CALLS=1 — at most one unbound call at a time.
+    // Safe under MAX_CONCURRENT_CALLS=1 per tenant — at most one unbound call at a time.
     if (!call) {
       const candidate = await prisma.call.findFirst({
         where: {
+          ...(ownerHint ? { ownerId: ownerHint } : {}),
           vapiCallId: null,
           status: { in: ["dispatching", "ringing"] },
           createdAt: { gte: new Date(Date.now() - 2 * 60 * 1000) },
@@ -219,7 +226,7 @@ export async function POST(req: NextRequest) {
       let smsEnabled = false;
       let autoRetry = true;
       try {
-        const settings = await getSettings();
+        const settings = await getSettings(call.ownerId);
         retryDelayHours = settings.retryDelayHours ?? 24;
         smsEnabled = settings.smsEnabled ?? false;
         autoRetry = settings.autoRetry ?? true;
@@ -239,11 +246,11 @@ export async function POST(req: NextRequest) {
         const linkedIds = links.map((l) => l.invoiceId);
         if (outcome === "success" || outcome === "partial") {
           await prisma.invoice.updateMany({
-            where: { id: { in: linkedIds }, status: "calling" },
+            where: { id: { in: linkedIds }, ownerId: call.ownerId, status: "calling" },
             data: { status: "resolved" },
           });
         } else {
-          const linked = await prisma.invoice.findMany({ where: { id: { in: linkedIds }, status: "calling" } });
+          const linked = await prisma.invoice.findMany({ where: { id: { in: linkedIds }, ownerId: call.ownerId, status: "calling" } });
           for (const inv of linked) {
             if (!autoRetry || inv.attempts >= MAX_INVOICE_ATTEMPTS) {
               await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed" } });
@@ -260,6 +267,30 @@ export async function POST(req: NextRequest) {
         }
       } catch (err) {
         console.error("[webhook] invoice resolution failed", err);
+      }
+
+      // Update the outbound Ticket linked to this call (1D): a reached contact resolves
+      // it, otherwise it stays In Progress. Also stamp transcript/summary onto the ticket.
+      try {
+        const ticket = await getTicketByCallId(call.ownerId, call.id);
+        if (ticket) {
+          const ticketStatus = outcome === "success" || outcome === "partial" ? "Resolved" : "In Progress";
+          await updateTicket(call.ownerId, ticket.id, {
+            status: ticketStatus,
+            transcript,
+            aiSummary: summary,
+          });
+        }
+      } catch (err) {
+        console.error("[webhook] ticket update failed", err);
+      }
+
+      // Backfill the debtor Customer with any corrected contact facts learned on the
+      // call (1E) — owner-scoped, best-effort.
+      try {
+        await backfillCustomerFromCall(call.ownerId, call.id);
+      } catch (err) {
+        console.error("[webhook] customer backfill failed", err);
       }
 
       // SMS follow-up — fire and forget; never let SMS failure affect webhook response.
