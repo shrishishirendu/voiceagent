@@ -2,6 +2,17 @@
 
 type IconProps = { className?: string };
 
+export function IconChart({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M3 3v13.5a.5.5 0 0 0 .5.5H17" strokeLinecap="round" />
+      <rect x="6" y="9" width="2.5" height="5" rx="0.5" />
+      <rect x="10.5" y="6" width="2.5" height="8" rx="0.5" />
+      <rect x="15" y="11" width="2.5" height="3" rx="0.5" />
+    </svg>
+  );
+}
+
 export function IconGrid({ className = 'w-4 h-4' }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
