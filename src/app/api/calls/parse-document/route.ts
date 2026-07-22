@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
+import { ParsedInvoiceSchema, normaliseParsedInvoice } from "@/lib/invoice-parse";
+import { matchTemplate } from "@/lib/invoice-templates";
+
+// PDF text extraction (pdf-parse) runs in the Node runtime, not Edge.
+export const runtime = "nodejs";
 
 const EXTRACTION_PROMPT = `You are extracting information from a business invoice to pre-fill a call brief. We sent this invoice to a client and are calling them to chase payment. This invoice may span multiple pages — scan all pages before responding.
 
@@ -15,40 +20,6 @@ invoiceNotes: include only notes specific and directly relevant to THIS invoice 
 
 Return all dates (invoiceDate, dueDate) in YYYY-MM-DD format regardless of how they appear in the document. Return null for any field not found. Never invent information.`;
 
-const LineItemSchema = z.object({
-  description: z.string().nullable(),
-  quantity: z.number().nullable(),
-  unitPrice: z.number().nullable(),
-  amount: z.number().nullable(),
-});
-
-const PaymentDetailsSchema = z.object({
-  bankName: z.string().nullable().optional(),
-  bsb: z.string().nullable().optional(),
-  accountNumber: z.string().nullable().optional(),
-  swiftCode: z.string().nullable().optional(),
-  abn: z.string().nullable().optional(),
-  remittanceName: z.string().nullable().optional(),
-  remittanceContact: z.string().nullable().optional(),
-});
-
-const ParsedInvoiceSchema = z.object({
-  vendorName: z.string().nullable(),
-  contactBusiness: z.string().nullable(),
-  contactPerson: z.string().nullable().optional(),
-  toNumber: z.string().nullable(),
-  invoiceNumber: z.string().nullable(),
-  invoiceDate: z.string().nullable(),
-  dueDate: z.string().nullable(),
-  amountDue: z.number().nullable(),
-  currency: z.string().nullable(),
-  lineItems: z.union([z.array(LineItemSchema), z.string(), z.null()]),
-  invoiceNotes: z.string().nullable(),
-  paymentDetails: PaymentDetailsSchema.nullable().optional(),
-});
-
-type ParsedInvoice = z.infer<typeof ParsedInvoiceSchema>;
-
 const GeminiResponseSchema = z.object({
   candidates: z.array(
     z.object({
@@ -59,71 +30,24 @@ const GeminiResponseSchema = z.object({
   ),
 });
 
-const PHONE_MIN_DIGITS = 9;
-
-function normalisePhone(value: string | null): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed || /[A-Za-z]/.test(trimmed)) return null;
-  const digits = trimmed.replace(/\D/g, "");
-  return digits.length >= PHONE_MIN_DIGITS ? trimmed : null;
-}
-
-function looksLikeBusinessName(value: string | null): value is string {
-  if (!value) return false;
-  const trimmed = value.trim();
-  return !!trimmed && /[A-Za-z]/.test(trimmed) && !trimmed.includes("@") && trimmed.length <= 120;
-}
-
-function looksLikeContactHandle(value: string | null): boolean {
-  if (!value) return true;
-  const trimmed = value.trim();
-  return trimmed.includes("@") || (/^[A-Za-z0-9._-]+$/.test(trimmed) && trimmed.includes("."));
-}
-
-function normaliseParsedInvoice(parsed: ParsedInvoice) {
-  const pd = parsed.paymentDetails ?? null;
-  const toNumber = normalisePhone(parsed.toNumber);
-  const contactBusiness =
-    !toNumber && looksLikeBusinessName(parsed.toNumber) && looksLikeContactHandle(parsed.contactBusiness ?? null)
-      ? parsed.toNumber.trim()
-      : parsed.contactBusiness ?? null;
-
-  return {
-    vendorName: parsed.vendorName,
-    contactBusiness,
-    contactPerson: parsed.contactPerson ?? null,
-    toNumber,
-    invoiceNumber: parsed.invoiceNumber,
-    invoiceDate: parsed.invoiceDate,
-    dueDate: parsed.dueDate,
-    amountDue: parsed.amountDue,
-    currency: parsed.currency,
-    lineItems:
-      parsed.lineItems == null
-        ? null
-        : typeof parsed.lineItems === "string"
-          ? parsed.lineItems
-          : JSON.stringify(parsed.lineItems),
-    invoiceNotes: parsed.invoiceNotes,
-    bankName: pd?.bankName ?? null,
-    bsb: pd?.bsb ?? null,
-    accountNumber: pd?.accountNumber ?? null,
-    swiftCode: pd?.swiftCode ?? null,
-    abn: pd?.abn ?? null,
-    remittanceName: pd?.remittanceName ?? null,
-    remittanceContact: pd?.remittanceContact ?? null,
-  };
+// Extract the embedded text layer from a PDF buffer. Imported dynamically from the
+// library entrypoint (not the package index, which runs a debug harness on import).
+async function extractPdfText(buf: Buffer): Promise<string> {
+  try {
+    const mod = await import("pdf-parse/lib/pdf-parse.js");
+    const pdf = (mod as unknown as { default: (b: Buffer) => Promise<{ text: string }> }).default;
+    const data = await pdf(buf);
+    return data.text ?? "";
+  } catch (err) {
+    console.error("[parse-document] PDF text extraction failed:", err);
+    return "";
+  }
 }
 
 export async function POST(req: NextRequest) {
   const access = await resolveAccess();
   if (!access) return unauthorized();
   if (!hasRole(access, "agent")) return forbidden();
-
-  if (!process.env.GEMINI_API_KEY) {
-    return NextResponse.json({ error: "Missing GEMINI_API_KEY" }, { status: 500 });
-  }
 
   let formData: FormData;
   try {
@@ -136,23 +60,45 @@ export async function POST(req: NextRequest) {
   if (!(file instanceof File)) {
     return NextResponse.json({ error: 'Missing "document" file' }, { status: 400 });
   }
-
   if (file.type !== "application/pdf") {
     return NextResponse.json({ error: "Document must be a PDF" }, { status: 400 });
   }
-
   const MAX_PDF_BYTES = 20 * 1024 * 1024; // 20 MB
   if (file.size > MAX_PDF_BYTES) {
     return NextResponse.json({ error: "PDF must be under 20 MB" }, { status: 413 });
   }
 
-  let base64Document: string;
+  let buffer: Buffer;
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    base64Document = Buffer.from(arrayBuffer).toString("base64");
+    buffer = Buffer.from(await file.arrayBuffer());
   } catch {
     return NextResponse.json({ error: "Failed to read uploaded PDF" }, { status: 400 });
   }
+
+  // ── Deterministic path: fingerprint against known vendor templates ──────────
+  // If a template recognises the vendor and the extraction has the essentials, we
+  // return it directly — no Gemini call (fast, free, and stable for recurring vendors).
+  const text = await extractPdfText(buffer);
+  if (text) {
+    const match = matchTemplate(text);
+    if (match && match.valid) {
+      console.log(`[parse-document] template hit: ${match.templateId}`);
+      return NextResponse.json({ ...normaliseParsedInvoice(match.parsed), _source: "template", _templateId: match.templateId });
+    }
+    if (match) {
+      console.log(`[parse-document] template ${match.templateId} matched but incomplete — falling back to Gemini`);
+    }
+  }
+
+  // ── Fallback path: Gemini vision extraction ─────────────────────────────────
+  if (!process.env.GEMINI_API_KEY) {
+    return NextResponse.json(
+      { error: "No template matched this invoice and GEMINI_API_KEY is not set, so it can't be parsed automatically. Enter the details manually or add a template for this vendor." },
+      { status: 422 }
+    );
+  }
+
+  const base64Document = buffer.toString("base64");
 
   let geminiResponse: Response;
   try {
@@ -168,12 +114,7 @@ export async function POST(req: NextRequest) {
           contents: [
             {
               parts: [
-                {
-                  inline_data: {
-                    mime_type: "application/pdf",
-                    data: base64Document,
-                  },
-                },
+                { inline_data: { mime_type: "application/pdf", data: base64Document } },
                 { text: EXTRACTION_PROMPT },
               ],
             },
@@ -185,15 +126,15 @@ export async function POST(req: NextRequest) {
             response_schema: {
               type: "object",
               properties: {
-                vendorName:       { type: "string", nullable: true },
-                contactBusiness:  { type: "string", nullable: true },
-                contactPerson:    { type: "string", nullable: true },
-                toNumber:         { type: "string", nullable: true },
+                vendorName: { type: "string", nullable: true },
+                contactBusiness: { type: "string", nullable: true },
+                contactPerson: { type: "string", nullable: true },
+                toNumber: { type: "string", nullable: true },
                 invoiceNumber: { type: "string", nullable: true },
-                invoiceDate:   { type: "string", nullable: true },
-                dueDate:       { type: "string", nullable: true },
-                amountDue:     { type: "number", nullable: true },
-                currency:      { type: "string", nullable: true },
+                invoiceDate: { type: "string", nullable: true },
+                dueDate: { type: "string", nullable: true },
+                amountDue: { type: "number", nullable: true },
+                currency: { type: "string", nullable: true },
                 lineItems: {
                   type: "array",
                   nullable: true,
@@ -201,9 +142,9 @@ export async function POST(req: NextRequest) {
                     type: "object",
                     properties: {
                       description: { type: "string", nullable: true },
-                      quantity:    { type: "number", nullable: true },
-                      unitPrice:   { type: "number", nullable: true },
-                      amount:      { type: "number", nullable: true },
+                      quantity: { type: "number", nullable: true },
+                      unitPrice: { type: "number", nullable: true },
+                      amount: { type: "number", nullable: true },
                     },
                   },
                 },
@@ -212,12 +153,12 @@ export async function POST(req: NextRequest) {
                   type: "object",
                   nullable: true,
                   properties: {
-                    bankName:          { type: "string", nullable: true },
-                    bsb:               { type: "string", nullable: true },
-                    accountNumber:     { type: "string", nullable: true },
-                    swiftCode:         { type: "string", nullable: true },
-                    abn:               { type: "string", nullable: true },
-                    remittanceName:    { type: "string", nullable: true },
+                    bankName: { type: "string", nullable: true },
+                    bsb: { type: "string", nullable: true },
+                    accountNumber: { type: "string", nullable: true },
+                    swiftCode: { type: "string", nullable: true },
+                    abn: { type: "string", nullable: true },
+                    remittanceName: { type: "string", nullable: true },
                     remittanceContact: { type: "string", nullable: true },
                   },
                 },
@@ -235,10 +176,7 @@ export async function POST(req: NextRequest) {
   if (!geminiResponse.ok) {
     const errorText = await geminiResponse.text();
     console.error("[parse-document] Gemini error:", geminiResponse.status, errorText);
-    return NextResponse.json(
-      { error: "Document parsing failed — please try again" },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: "Document parsing failed — please try again" }, { status: 502 });
   }
 
   let rawResponse: unknown;
@@ -254,7 +192,6 @@ export async function POST(req: NextRequest) {
   }
 
   const textContent = message.data.candidates[0]?.content?.parts[0]?.text?.trim() ?? "";
-
   if (!textContent) {
     return NextResponse.json({ error: "Gemini returned empty content" }, { status: 502 });
   }
@@ -268,11 +205,8 @@ export async function POST(req: NextRequest) {
 
   const parsedInvoice = ParsedInvoiceSchema.safeParse(parsedJson);
   if (!parsedInvoice.success) {
-    return NextResponse.json(
-      { error: "Parsed invoice JSON did not match the expected shape" },
-      { status: 502 }
-    );
+    return NextResponse.json({ error: "Parsed invoice JSON did not match the expected shape" }, { status: 502 });
   }
 
-  return NextResponse.json(normaliseParsedInvoice(parsedInvoice.data));
+  return NextResponse.json({ ...normaliseParsedInvoice(parsedInvoice.data), _source: "gemini" });
 }

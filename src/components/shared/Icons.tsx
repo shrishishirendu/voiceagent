@@ -61,6 +61,15 @@ export function IconPhone({ className = 'w-4 h-4' }: IconProps) {
   );
 }
 
+export function IconPie({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M10 3a7 7 0 1 0 7 7h-7V3z" strokeLinejoin="round" />
+      <path d="M10 3v7h7" strokeLinejoin="round" opacity="0.4" />
+    </svg>
+  );
+}
+
 export function IconTrend({ className = 'w-4 h-4' }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">

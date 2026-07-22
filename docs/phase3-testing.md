@@ -114,6 +114,41 @@ Throughout, "owner" = the email you signed in as (lowercased) — it's your work
 
 ---
 
+## 3B — Deterministic invoice parser (recurring vendors → no Gemini call)
+
+**Where:** Invoices → upload a PDF (uses `/api/calls/parse-document`).
+
+1. **Unit test the templates** (no PDF needed):
+   ```bash
+   npx tsx scripts/test-invoice-templates.ts     # expect 5/5 passed
+   ```
+   Covers Spiced Tea Chai, Quest Software, Altus Financial, Green Design, Vertel — asserting
+   invoice number, dates, total, ABN, BSB/account, and line-item counts.
+2. **Run the real PDFs through the exact route pipeline** (pdf-parse → template match):
+   ```bash
+   npx tsx scripts/parse-invoice-pdf.ts "path/to/Invoice INV-22050 SPICED TEA.pdf"
+   # multiple at once, and --text to also dump the extracted text:
+   npx tsx scripts/parse-invoice-pdf.ts --text "path/to/one.pdf"
+   ```
+   Each known vendor prints `→ template: <id> (valid=true)` and the normalised fields. An
+   **unknown** vendor prints `→ no template matched (would fall back to Gemini)`.
+3. **End-to-end via the UI:** upload one of these PDFs on the Invoices screen — the brief
+   pre-fills from the deterministic path (server log: `[parse-document] template hit: <id>`),
+   **no Gemini call and no `GEMINI_API_KEY` required**. Upload an unrecognised vendor's PDF and,
+   if `GEMINI_API_KEY` is set, it falls back to Gemini; if not, you get a clear 422 asking you to
+   enter details manually or add a template.
+
+## 3E — Analytics (inbound/outbound segmentation)
+
+**Where:** *Analytics* tab (sidebar).
+
+1. Make a few outbound calls so tickets exist. The page shows channel mix (donut), outbound status
+   mix, resolution rate, and per-day small-multiple bars (one per channel). `GET /api/analytics`
+   returns the raw segmented numbers.
+2. Segmentation is by the ticket `tags` jsonb (`outbound`/`inbound`). Everything here is outbound
+   today; the **Inbound** series stays at zero with an explanatory note until EnvoyIn's inbound
+   tickets share the workspace after the merge — that's expected, not a bug.
+
 ## Regression / build
 
 ```bash
