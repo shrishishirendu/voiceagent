@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { computeGroupKey, getSettings, normalisePhone, parseLineItemRows } from "@/lib/dispatcher";
-import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
+import { resolveAccess, hasRole, unauthorized, forbidden, trimInvoiceForAccess } from "@/lib/access";
 
 const PatchSchema = z.object({
   contactBusiness: z.string().min(1).max(120).optional(),
@@ -106,7 +106,7 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     }
   }
 
-  return NextResponse.json(updated);
+  return NextResponse.json(trimInvoiceForAccess(updated as unknown as Record<string, unknown>, access));
 }
 
 export async function DELETE(_: NextRequest, { params }: { params: { id: string } }) {

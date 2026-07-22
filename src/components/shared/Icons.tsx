@@ -61,6 +61,25 @@ export function IconPhone({ className = 'w-4 h-4' }: IconProps) {
   );
 }
 
+export function IconTrend({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M3 14l4-4 3 3 6-6.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 6.5h4v4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function IconWallet({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="3" y="5" width="14" height="11" rx="2" />
+      <path d="M3 8h14" strokeLinecap="round" />
+      <circle cx="13.5" cy="12" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function IconX({ className = 'w-4 h-4' }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2">

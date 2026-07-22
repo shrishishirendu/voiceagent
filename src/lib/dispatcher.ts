@@ -18,6 +18,7 @@ import {
 } from "@/lib/vapi";
 import { companyNamesMatch } from "@/lib/nameUtils";
 import { createTicket } from "@/lib/tickets";
+import { resolveDispatchConfig } from "@/lib/credentials";
 import { Prisma } from "@prisma/client";
 import type { Call, Invoice, Settings, InvoiceLineItem } from "@prisma/client";
 
@@ -398,17 +399,6 @@ export function groupAndOrder(invoices: Invoice[], settings: Settings): Invoice[
 
 // --- Dispatch one debtor group as a single aggregated call ---------------
 
-function requiredEnv(): string[] {
-  const missing: string[] = [];
-  if (!process.env.VAPI_PRIVATE_KEY) missing.push("VAPI_PRIVATE_KEY");
-  if (!process.env.TWILIO_ACCOUNT_SID) missing.push("TWILIO_ACCOUNT_SID");
-  if (!process.env.TWILIO_AUTH_TOKEN) missing.push("TWILIO_AUTH_TOKEN");
-  if (!process.env.TWILIO_PHONE_NUMBER) missing.push("TWILIO_PHONE_NUMBER");
-  if (!process.env.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY");
-  if (!process.env.PUBLIC_URL) missing.push("PUBLIC_URL");
-  return missing;
-}
-
 export type DispatchResult =
   | { ok: true; callId: string; vapiCallId?: string }
   | { ok: false; error: string };
@@ -418,8 +408,10 @@ export type DispatchResult =
 export async function dispatchInvoiceGroup(ownerId: string, invoices: Invoice[]): Promise<DispatchResult> {
   if (invoices.length === 0) return { ok: false, error: "empty group" };
 
-  const missing = requiredEnv();
-  if (missing.length) return { ok: false, error: `missing env: ${missing.join(", ")}` };
+  // Per-tenant outbound config (own Vapi/Twilio/Anthropic keys + caller-id), each
+  // falling back to the process env when the tenant hasn't set its own (Phase 3-G).
+  const { config: cfg, missing } = await resolveDispatchConfig(ownerId);
+  if (missing.length) return { ok: false, error: `missing config: ${missing.join(", ")}` };
 
   // Oldest-due invoice represents the debtor for flat Call fields + dialing.
   const sorted = [...invoices].sort((a, b) =>
@@ -566,11 +558,12 @@ export async function dispatchInvoiceGroup(ownerId: string, invoices: Invoice[])
       abn: lead.abn ?? undefined,
       remittanceName: lead.remittanceName ?? undefined,
       remittanceContact: lead.remittanceContact ?? undefined,
-      twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER!,
-      twilioAccountSid: process.env.TWILIO_ACCOUNT_SID!,
-      twilioAuthToken: process.env.TWILIO_AUTH_TOKEN!,
-      publicUrl: process.env.PUBLIC_URL!,
-      anthropicKey: process.env.ANTHROPIC_API_KEY!,
+      twilioPhoneNumber: cfg.twilioPhoneNumber,
+      twilioAccountSid: cfg.twilioAccountSid,
+      twilioAuthToken: cfg.twilioAuthToken,
+      publicUrl: cfg.publicUrl,
+      anthropicKey: cfg.anthropicKey,
+      vapiPrivateKey: cfg.vapiPrivateKey,
     });
 
     await prisma.call.update({

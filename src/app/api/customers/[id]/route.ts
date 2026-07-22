@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getCustomer, updateCustomer } from '@/lib/customers'
-import { resolveAccess, hasRole, unauthorized, forbidden } from '@/lib/access'
+import { resolveAccess, hasRole, unauthorized, forbidden, trimCustomerForAccess } from '@/lib/access'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,7 +10,9 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   if (!access) return unauthorized()
   const detail = await getCustomer(access.ownerId, params.id)
   if (!detail) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  return NextResponse.json(detail)
+  // Trim contact PII on the customer header for non-admins (invoice sub-rows here carry
+  // no banking fields, so only the customer object needs trimming).
+  return NextResponse.json({ ...detail, customer: trimCustomerForAccess(detail.customer, access) })
 }
 
 const PatchSchema = z.object({

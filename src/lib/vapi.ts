@@ -407,6 +407,7 @@ interface CreateCallArgs {
   twilioAuthToken: string;
   publicUrl: string; // Where Vapi will POST webhooks
   anthropicKey: string;
+  vapiPrivateKey: string; // per-tenant Vapi key (falls back to env at the dispatcher)
 }
 
 interface VapiCallResponse {
@@ -571,7 +572,8 @@ export async function dispatchVapiCall(args: CreateCallArgs): Promise<VapiCallRe
     const res = await fetch(`${VAPI_BASE}/call`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.VAPI_PRIVATE_KEY}`,
+        // Per-tenant key resolved by the dispatcher (env fallback happens there).
+        Authorization: `Bearer ${args.vapiPrivateKey || process.env.VAPI_PRIVATE_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),

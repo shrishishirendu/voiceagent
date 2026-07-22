@@ -26,6 +26,7 @@ type Detail = {
 };
 
 type Tab = 'invoices' | 'tickets' | 'calls' | 'payments';
+type PaymentEntry = { id: string; source: 'ar' | 'inbound'; invoiceNumber: string | null; amount: number; currency: string | null; date: string; type: string | null };
 
 const STATUS_CLS: Record<string, string> = {
   pending: 'bg-amber-50 text-amber-700', queued: 'bg-sky-50 text-sky-700', calling: 'bg-indigo-50 text-indigo-700',
@@ -47,6 +48,21 @@ export default function CustomerDetailPage() {
   const [tab, setTab] = useState<Tab>('invoices');
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [payments, setPayments] = useState<PaymentEntry[] | null>(null);
+
+  const loadPayments = useCallback(async () => {
+    if (!id) return;
+    try {
+      const r = await fetch(`/api/payments?customerId=${id}`, { cache: 'no-store' });
+      if (r.ok) setPayments((await r.json()).ledger ?? []);
+    } catch {
+      setPayments([]);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    if (tab === 'payments' && payments === null) loadPayments();
+  }, [tab, payments, loadPayments]);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -168,10 +184,24 @@ export default function CustomerDetailPage() {
         )}
 
         {tab === 'payments' && (
-          <div className="text-center py-16">
-            <p className="font-display text-lg italic text-slate-400 mb-1.5">Payment tracking coming soon.</p>
-            <p className="text-sm text-slate-400">A unified received-payments ledger lands in Phase 3.</p>
-          </div>
+          payments === null ? (
+            <PanelSkeleton rows={3} />
+          ) : (
+            <TabList empty={payments.length === 0} emptyText="No payments recorded for this customer.">
+              {payments.map((p) => (
+                <div key={p.id} className="flex items-center justify-between gap-4 px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-slate-900 truncate">{p.invoiceNumber ? `Invoice ${p.invoiceNumber}` : (p.source === 'inbound' ? 'Inbound payment' : 'Payment')}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">{fmtWhen(p.date)}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Badge className={p.source === 'inbound' ? 'bg-sky-50 text-sky-700' : 'bg-emerald-50 text-emerald-700'}>{p.source === 'inbound' ? 'inbound' : p.type || 'payment'}</Badge>
+                    <span className="text-sm font-semibold text-slate-800">{fmtAmount(p.currency, p.amount) || '—'}</span>
+                  </div>
+                </div>
+              ))}
+            </TabList>
+          )
         )}
       </div>
 

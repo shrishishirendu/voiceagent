@@ -7,6 +7,8 @@ import { PanelSkeleton } from '@/components/shared/Skeleton';
 import { useAddToast } from '@/components/shared/Toast';
 import { IconGear, IconCalendar, IconSearch, IconRefresh } from '@/components/shared/Icons';
 import type { SchedulerSettings } from '@/lib/client-types';
+import { TeamSection } from './TeamSection';
+import { CredentialsSection } from './CredentialsSection';
 
 /** Sliding on/off switch. Only used on this page, so it lives here rather than as a shared component. */
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (next: boolean) => void; label?: string }) {
@@ -323,6 +325,12 @@ export default function SettingsPage() {
             </div>
           </CardBody>
         </Card>
+
+        {/* Outbound credentials + caller-id (Phase 3-G) — owner/admin only, self-hides otherwise */}
+        <CredentialsSection />
+
+        {/* Team & access (Phase 3-C) — owner/admin only, self-hides otherwise */}
+        <TeamSection />
       </div>
     </div>
   );

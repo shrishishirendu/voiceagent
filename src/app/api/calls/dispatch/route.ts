@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { dispatchVapiCall, buildVoicemailMessage, getVoiceLanguage, getVoiceGender } from "@/lib/vapi";
 import { resolveCustomerId } from "@/lib/dispatcher";
 import { createTicket } from "@/lib/tickets";
+import { resolveDispatchConfig } from "@/lib/credentials";
 import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
@@ -96,16 +97,10 @@ export async function POST(req: NextRequest) {
   const normalisedNumber = normalisePhone(toNumber);
   const voicemailScript = buildVoicemailMessage({ contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate, language: getVoiceLanguage(voice), gender: getVoiceGender(voice) });
 
-  // Required env
-  const missing: string[] = [];
-  if (!process.env.VAPI_PRIVATE_KEY) missing.push("VAPI_PRIVATE_KEY");
-  if (!process.env.TWILIO_ACCOUNT_SID) missing.push("TWILIO_ACCOUNT_SID");
-  if (!process.env.TWILIO_AUTH_TOKEN) missing.push("TWILIO_AUTH_TOKEN");
-  if (!process.env.TWILIO_PHONE_NUMBER) missing.push("TWILIO_PHONE_NUMBER");
-  if (!process.env.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY");
-  if (!process.env.PUBLIC_URL) missing.push("PUBLIC_URL");
+  // Per-tenant outbound config (own keys + caller-id, env fallback) — Phase 3-G.
+  const { config: cfg, missing } = await resolveDispatchConfig(ownerId);
   if (missing.length) {
-    console.error("[dispatch] missing env vars:", missing.join(", "));
+    console.error("[dispatch] missing config:", missing.join(", "));
     return NextResponse.json(
       { error: "Server configuration error. Contact the administrator." },
       { status: 500 }
@@ -221,11 +216,12 @@ export async function POST(req: NextRequest) {
       abn,
       remittanceName,
       remittanceContact,
-      twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER!,
-      twilioAccountSid: process.env.TWILIO_ACCOUNT_SID!,
-      twilioAuthToken: process.env.TWILIO_AUTH_TOKEN!,
-      publicUrl: process.env.PUBLIC_URL!,
-      anthropicKey: process.env.ANTHROPIC_API_KEY!,
+      twilioPhoneNumber: cfg.twilioPhoneNumber,
+      twilioAccountSid: cfg.twilioAccountSid,
+      twilioAuthToken: cfg.twilioAuthToken,
+      publicUrl: cfg.publicUrl,
+      anthropicKey: cfg.anthropicKey,
+      vapiPrivateKey: cfg.vapiPrivateKey,
     });
 
     await prisma.call.update({

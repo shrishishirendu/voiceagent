@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getCustomers, createCustomer } from '@/lib/customers'
-import { resolveAccess, hasRole, unauthorized, forbidden } from '@/lib/access'
+import { resolveAccess, hasRole, unauthorized, forbidden, trimCustomerForAccess } from '@/lib/access'
 
 export const dynamic = 'force-dynamic'
 
 export async function GET() {
   const access = await resolveAccess()
   if (!access) return unauthorized()
-  const customers = await getCustomers(access.ownerId)
+  const customers = (await getCustomers(access.ownerId)).map((c) => trimCustomerForAccess(c, access))
   return NextResponse.json({ customers })
 }
 

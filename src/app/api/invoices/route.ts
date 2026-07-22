@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { computeGroupKey, getSettings, normalisePhone, syncCallFromVapi, resolveCustomerId, parseLineItemRows, serializeLineItems } from "@/lib/dispatcher";
 import { companyNamesMatch } from "@/lib/nameUtils";
-import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
+import { resolveAccess, hasRole, unauthorized, forbidden, trimInvoiceForAccess } from "@/lib/access";
 
 /**
  * Enqueue a parsed invoice for scheduled chasing.
@@ -234,7 +234,8 @@ export async function GET() {
   // line items re-serialised to a JSON string, and a single `call` summary object.
   const serialize = (inv: (typeof invoices)[number]) => {
     const { lineItems, callLinks, ...rest } = inv;
-    return { ...rest, lineItems: serializeLineItems(lineItems), call: callLinks[0]?.call ?? null };
+    // Trim banking/remittance fields for viewer/agent roles (Phase 3-C).
+    return trimInvoiceForAccess({ ...rest, lineItems: serializeLineItems(lineItems), call: callLinks[0]?.call ?? null }, access);
   };
 
   // Self-heal any non-terminal linked call directly from Vapi (mirrors the Live

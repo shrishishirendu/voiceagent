@@ -87,21 +87,40 @@ export function unauthorized() {
   return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 }
 
-// ── Field-level trimming (Phase 1 stubs; filled in Phase 3-C) ────────────────
-// Non-admins must not see payment/banking + contact PII on Customer/Invoice. For now
-// these are identity passthroughs so callers can already route responses through them.
+// ── Field-level trimming (Phase 3-C) ─────────────────────────────────────────
+// Viewers and agents must not see payment/banking details or contact PII. Only
+// admin/owner get the full record; everyone else gets a copy with the sensitive
+// keys deleted. Trimming happens in the API layer (before serialisation) so the
+// wire never carries what the role isn't allowed to see — not just hidden in the UI.
 const CAN_SEE_SENSITIVE: Role[] = ['admin', 'owner']
+
+// Banking / remittance fields that appear on Invoice and (as a snapshot) on Call.
+const BANKING_KEYS = ['bankName', 'bsb', 'accountNumber', 'swiftCode', 'remittanceName', 'remittanceContact'] as const
+// Customer contact PII + commercial-sensitivity fields.
+const CUSTOMER_PII_KEYS = ['contactPhone', 'email', 'email1', 'email2', 'abn', 'creditLimit'] as const
 
 export function canSeeSensitive(access: Access | null): boolean {
   return !!access && CAN_SEE_SENSITIVE.includes(access.role)
 }
 
-export function trimCustomerForAccess<T>(customer: T, _access: Access | null): T {
-  // Phase 3-C: strip contactPhone/email/abn/creditLimit for non-admins.
-  return customer
+function stripKeys<T extends Record<string, unknown>>(obj: T, keys: readonly string[]): T {
+  const copy = { ...obj }
+  for (const k of keys) if (k in copy) delete (copy as Record<string, unknown>)[k]
+  return copy
 }
 
-export function trimInvoiceForAccess<T>(invoice: T, _access: Access | null): T {
-  // Phase 3-C: strip bankName/bsb/accountNumber/swiftCode/remittance for non-admins.
-  return invoice
+export function trimCustomerForAccess<T extends Record<string, unknown>>(customer: T, access: Access | null): T {
+  if (canSeeSensitive(access)) return customer
+  return stripKeys(customer, CUSTOMER_PII_KEYS)
+}
+
+export function trimInvoiceForAccess<T extends Record<string, unknown>>(invoice: T, access: Access | null): T {
+  if (canSeeSensitive(access)) return invoice
+  return stripKeys(invoice, BANKING_KEYS)
+}
+
+// A Call row carries the same banking snapshot fields as an Invoice.
+export function trimCallForAccess<T extends Record<string, unknown>>(call: T, access: Access | null): T {
+  if (canSeeSensitive(access)) return call
+  return stripKeys(call, BANKING_KEYS)
 }
