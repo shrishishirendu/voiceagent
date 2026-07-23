@@ -4,12 +4,13 @@ import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { EnvoyLogo, IsoftLogo } from '@/components/shared/Logo';
-import { IconGrid, IconPhone, IconUpload, IconCalendar, IconGear, IconChevronRight, IconUsers, IconChart, IconWallet, IconTrend, IconPie } from '@/components/shared/Icons';
+import { IconGrid, IconPhone, IconUpload, IconCalendar, IconGear, IconChevronRight, IconUsers, IconChart, IconWallet, IconTrend, IconPie, IconTicket } from '@/components/shared/Icons';
 import { SchedulerStatusPill } from './SchedulerStatusPill';
 
 const NAV = [
   { id: 'dashboard', label: 'Home', icon: IconGrid, href: '/app/dashboard' },
   { id: 'outbound', label: 'Outbound', icon: IconChart, href: '/app/outbound' },
+  { id: 'tickets', label: 'Tickets', icon: IconTicket, href: '/app/tickets' },
   { id: 'forecasting', label: 'Forecast', icon: IconTrend, href: '/app/forecasting' },
   { id: 'analytics', label: 'Analytics', icon: IconPie, href: '/app/analytics' },
   { id: 'calls', label: 'New Call', icon: IconPhone, href: '/app/calls/new', iconKey: 'new-call' },

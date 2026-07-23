@@ -20,7 +20,7 @@ type Detail = {
     isActive: boolean; invoiceCount: number; openInvoiceCount: number; ticketCount: number;
     callCount: number; outstanding: number;
   };
-  invoices: { id: string; invoiceNumber: string | null; invoiceDate: string | null; dueDate: string | null; amountDue: number | null; currency: string | null; status: string }[];
+  invoices: { id: string; invoiceNumber: string | null; invoiceDate: string | null; dueDate: string | null; amountDue: number | null; currency: string | null; status: string; sourceFilePath: string | null; toNumber: string | null; groupKey: string }[];
   tickets: { id: string; title: string | null; channel: string; status: string; tags: string[]; aiSummary: string | null; createdAt: string }[];
   calls: { id: string; contactBusiness: string; status: string; outcome: string | null; summary: string | null; durationSec: number | null; createdAt: string }[];
 };
@@ -29,6 +29,7 @@ type Tab = 'invoices' | 'tickets' | 'calls' | 'payments';
 type PaymentEntry = { id: string; source: 'ar' | 'inbound'; invoiceNumber: string | null; amount: number; currency: string | null; date: string; type: string | null };
 
 const STATUS_CLS: Record<string, string> = {
+  stored: 'bg-slate-100 text-slate-600',
   pending: 'bg-amber-50 text-amber-700', queued: 'bg-sky-50 text-sky-700', calling: 'bg-indigo-50 text-indigo-700',
   resolved: 'bg-emerald-50 text-emerald-700', failed: 'bg-rose-50 text-rose-700', cancelled: 'bg-slate-100 text-slate-500',
   Incoming: 'bg-amber-50 text-amber-700', 'In Progress': 'bg-indigo-50 text-indigo-700', Resolved: 'bg-emerald-50 text-emerald-700',
@@ -78,6 +79,37 @@ export default function CustomerDetailPage() {
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
+
+  const [invBusy, setInvBusy] = useState<string | null>(null);
+
+  const enqueueInvoice = useCallback(async (invId: string, dispatchNow: boolean, groupKey: string, toNumber: string | null) => {
+    if (!toNumber) { addToast('This invoice has no phone number — add one via Edit first.', 'error'); return; }
+    setInvBusy(invId);
+    try {
+      const patch = await fetch(`/api/invoices/${invId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'pending', chaseAfter: new Date().toISOString() }),
+      });
+      if (!patch.ok) throw new Error('enqueue failed');
+      if (dispatchNow) {
+        const r = await fetch('/api/invoices/dispatch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ groupKey }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (r.ok && j.dispatched > 0) addToast('Call dispatched.', 'success');
+        else addToast(j.reason || j.errors?.[0] || 'Queued — will dial in business hours.', 'info');
+      } else {
+        addToast('Invoice queued for chasing.', 'success');
+      }
+      await load();
+    } catch (e) {
+      console.error(e);
+      addToast('Action failed.', 'error');
+    } finally {
+      setInvBusy(null);
+    }
+  }, [addToast, load]);
 
   if (loading) return <div className="p-8"><PanelSkeleton /></div>;
   if (notFound || !data) {
@@ -133,18 +165,52 @@ export default function CustomerDetailPage() {
       <div className="flex-1 min-h-0 overflow-y-auto px-8 py-6">
         {tab === 'invoices' && (
           <TabList empty={data.invoices.length === 0} emptyText="No invoices for this customer.">
-            {data.invoices.map((inv) => (
-              <div key={inv.id} className="flex items-center justify-between gap-4 px-4 py-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">{inv.invoiceNumber || 'No number'}</p>
-                  <p className="text-xs text-slate-400 mt-0.5">{inv.dueDate ? `Due ${fmtDate(inv.dueDate)}` : 'No due date'}</p>
+            {data.invoices.map((inv) => {
+              const canDispatch = inv.status === 'stored' || inv.status === 'pending';
+              return (
+                <div key={inv.id} className="flex items-center justify-between gap-4 px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-slate-900 truncate">{inv.invoiceNumber || 'No number'}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">{inv.dueDate ? `Due ${fmtDate(inv.dueDate)}` : 'No due date'}</p>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {inv.sourceFilePath && (
+                      <a
+                        href={`/api/files/invoice?path=${encodeURIComponent(inv.sourceFilePath)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-slate-400 hover:text-brand transition-colors"
+                        title="Open the stored PDF"
+                      >
+                        PDF
+                      </a>
+                    )}
+                    <span className="text-sm font-medium text-slate-800">{fmtAmount(inv.currency, inv.amountDue) || '—'}</span>
+                    <StatusPill status={inv.status} />
+                    {canDispatch && (
+                      <div className="flex items-center gap-1.5">
+                        {inv.status === 'stored' && (
+                          <button
+                            className="btn-ghost text-xs !py-1 !px-2"
+                            disabled={invBusy === inv.id}
+                            onClick={() => enqueueInvoice(inv.id, false, inv.groupKey, inv.toNumber)}
+                          >
+                            {invBusy === inv.id ? '…' : 'Queue'}
+                          </button>
+                        )}
+                        <button
+                          className="btn-secondary text-xs !py-1 !px-2"
+                          disabled={invBusy === inv.id}
+                          onClick={() => enqueueInvoice(inv.id, true, inv.groupKey, inv.toNumber)}
+                        >
+                          {invBusy === inv.id ? '…' : 'Call now'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-4">
-                  <span className="text-sm font-medium text-slate-800">{fmtAmount(inv.currency, inv.amountDue) || '—'}</span>
-                  <StatusPill status={inv.status} />
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </TabList>
         )}
 

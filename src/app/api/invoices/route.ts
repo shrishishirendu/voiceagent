@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { computeGroupKey, getSettings, normalisePhone, syncCallFromVapi, resolveCustomerId, parseLineItemRows, serializeLineItems } from "@/lib/dispatcher";
-import { companyNamesMatch } from "@/lib/nameUtils";
+import { getSettings, syncCallFromVapi, serializeLineItems } from "@/lib/dispatcher";
+import { createInvoiceRow } from "@/lib/invoices";
 import { resolveAccess, hasRole, unauthorized, forbidden, trimInvoiceForAccess } from "@/lib/access";
 
 /**
@@ -37,17 +37,10 @@ const InvoiceSchema = z.object({
   remittanceName: z.string().optional(),
   remittanceContact: z.string().optional(),
   sourceFilePath: z.string().optional(),
+  // Uploaded/parsed invoices persist as "stored" (browsable per-customer, dispatchable later);
+  // pass "pending" to enqueue for the scheduler immediately. Defaults to permanent storage.
+  status: z.enum(["stored", "pending"]).default("stored"),
 });
-
-// chaseAfter = dueDate + offsetDays (00:00 recipient-naive). No/invalid dueDate ⇒
-// eligible immediately (chaseAfter = now).
-function computeChaseAfter(dueDate: string | undefined, offsetDays: number): Date {
-  if (!dueDate) return new Date();
-  const d = new Date(`${dueDate}T00:00:00`);
-  if (Number.isNaN(d.getTime())) return new Date();
-  d.setDate(d.getDate() + offsetDays);
-  return d;
-}
 
 export async function POST(req: NextRequest) {
   const access = await resolveAccess();
@@ -72,8 +65,6 @@ export async function POST(req: NextRequest) {
 
   const d = parsed.data;
   const settings = await getSettings(ownerId);
-  const chaseAfter = computeChaseAfter(d.dueDate, settings.dueOffsetDays);
-  const groupKey = computeGroupKey(d.abn, d.contactBusiness);
 
   try {
     // Read (fuzzy group-key resolution + dup check) and write happen in one transaction
@@ -81,77 +72,9 @@ export async function POST(req: NextRequest) {
     // in quick succession) can't each read a pre-commit state that's missing the other's
     // not-yet-committed row — without this, two invoices for the same company can end up
     // with different groupKeys instead of collapsing into one debtor group.
-    const result = await prisma.$transaction(async (tx) => {
-      const activeInvoices = await tx.invoice.findMany({
-        where: { ownerId, status: { in: ["pending", "queued", "calling"] } },
-        select: { groupKey: true, contactBusiness: true },
-      });
-      const matchedGroup = activeInvoices.find((i) =>
-        companyNamesMatch(i.contactBusiness, d.contactBusiness)
-      );
-      const resolvedGroupKey = matchedGroup?.groupKey ?? groupKey;
-
-      // Idempotent: if an active invoice with the same number already exists for this debtor, return it.
-      if (d.invoiceNumber) {
-        const dup = await tx.invoice.findFirst({
-          where: { ownerId, groupKey: resolvedGroupKey, invoiceNumber: d.invoiceNumber, status: { in: ["pending", "queued", "calling"] } },
-        });
-        if (dup) {
-          return { duplicate: true as const, id: dup.id, groupKey: resolvedGroupKey, chaseAfter: dup.chaseAfter };
-        }
-      }
-
-      const normalisedPhone = d.toNumber ? normalisePhone(d.toNumber) : null;
-      const customerId = await resolveCustomerId(tx, {
-        ownerId,
-        abn: d.abn,
-        businessName: d.contactBusiness,
-        contactPerson: d.contactPerson,
-        phone: normalisedPhone,
-      });
-
-      const invoice = await tx.invoice.create({
-        data: {
-          ownerId,
-          customerId,
-          contactBusiness: d.contactBusiness,
-          contactPerson: d.contactPerson,
-          toNumber: normalisedPhone,
-          abn: d.abn,
-          groupKey: resolvedGroupKey,
-          userName: d.userName,
-          voice: d.voice,
-          manner: d.manner,
-          objective: d.objective,
-          invoiceNumber: d.invoiceNumber,
-          invoiceDate: d.invoiceDate,
-          dueDate: d.dueDate,
-          amountDue: d.amountDue,
-          totalAmount: d.amountDue,
-          currency: d.currency,
-          invoiceNotes: d.invoiceNotes,
-          bankName: d.bankName,
-          bsb: d.bsb,
-          accountNumber: d.accountNumber,
-          swiftCode: d.swiftCode,
-          remittanceName: d.remittanceName,
-          remittanceContact: d.remittanceContact,
-          sourceFilePath: d.sourceFilePath,
-          chaseAfter,
-          status: "pending",
-        },
-      });
-
-      // Line items live in their own table.
-      const rows = parseLineItemRows(d.lineItems);
-      if (rows.length > 0) {
-        await tx.invoiceLineItem.createMany({
-          data: rows.map((r) => ({ ...r, invoiceId: invoice.id })),
-        });
-      }
-
-      return { duplicate: false as const, id: invoice.id, groupKey: resolvedGroupKey, chaseAfter };
-    });
+    const result = await prisma.$transaction((tx) =>
+      createInvoiceRow(tx, ownerId, d, { status: d.status, dueOffsetDays: settings.dueOffsetDays })
+    );
 
     return NextResponse.json(
       result.duplicate

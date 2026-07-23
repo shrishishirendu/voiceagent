@@ -380,7 +380,9 @@ export function BulkIntakeProvider({ children }: { children: ReactNode }) {
       const r = await fetch('/api/invoices', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildBulkBrief(item.parsed, item.storagePath)),
+        // "Queue" = enqueue for the scheduler now (POST /api/invoices defaults to "stored",
+        // so ask for "pending" explicitly to preserve the queue behaviour).
+        body: JSON.stringify({ ...buildBulkBrief(item.parsed, item.storagePath), status: 'pending' }),
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));

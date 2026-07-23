@@ -57,6 +57,26 @@ export default function NewInvoiceCallPage() {
 
       setParsed(result);
       setStage('review');
+
+      // Persist the uploaded invoice PERMANENTLY (status "stored") the moment it parses —
+      // independent of whether the user goes on to dispatch. This uploads the PDF to Storage,
+      // fills the invoice + line-item + customer tables, and makes it browsable under the
+      // customer and dispatchable later with zero re-parse. Non-blocking: a failure here
+      // never blocks the review/dispatch flow.
+      try {
+        const up = new FormData();
+        up.append('document', documentFile);
+        const upRes = await fetch('/api/files/upload', { method: 'POST', body: up });
+        const sourceFilePath = upRes.ok ? (await upRes.json()).path : undefined;
+        const save = await fetch('/api/invoices', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...buildBulkBrief(result), sourceFilePath, status: 'stored' }),
+        });
+        if (save.ok) addToast('Invoice saved to the customer.', 'success');
+      } catch {
+        /* non-blocking — the invoice can still be dispatched from the review form */
+      }
     } catch (e) {
       setParseError(e instanceof Error ? e.message : 'Failed to parse invoice');
     } finally {

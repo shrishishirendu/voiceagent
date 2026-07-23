@@ -127,7 +127,7 @@ model Invoice {
 
   // Scheduling / lifecycle
   chaseAfter        DateTime @map("chase_after") @db.Timestamptz
-  status            String   @default("pending") // pending | queued | calling | resolved | failed | cancelled
+  status            String   @default("pending") // stored | pending | queued | calling | resolved | failed | cancelled
   attempts          Int      @default(0)
 
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz

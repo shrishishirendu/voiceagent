@@ -18,6 +18,53 @@ export type TicketFilters = {
   allowedCategoryIds?: string[] | null
 }
 
+// The Tickets board/table needs the linked Call outcome + Customer name to render a
+// card and to derive the fine-grained outbound status the raw Ticket.status can't hold.
+const ticketListInclude = {
+  call: { select: { id: true, status: true, outcome: true, recordingUrl: true, durationSec: true } },
+  customer: { select: { id: true, businessName: true } },
+} satisfies Prisma.TicketInclude
+
+// The detail drawer additionally wants the linked invoice(s) (via the call_invoice join)
+// and the customer's phone; the full transcript/recording is fetched lazily by
+// CallDetailDrawer (keyed on callId) so we don't duplicate the (large) transcript here.
+const ticketDetailInclude = {
+  call: {
+    select: {
+      id: true, status: true, outcome: true, recordingUrl: true, durationSec: true, summary: true,
+      invoiceLinks: {
+        select: {
+          invoice: { select: { id: true, invoiceNumber: true, dueDate: true, amountDue: true, currency: true, status: true } },
+        },
+      },
+    },
+  },
+  customer: { select: { id: true, businessName: true, contactPhone: true } },
+} satisfies Prisma.TicketInclude
+
+export type TicketWithLinks = Prisma.TicketGetPayload<{ include: typeof ticketListInclude }>
+export type TicketDetail = Prisma.TicketGetPayload<{ include: typeof ticketDetailInclude }>
+
+export type OutboundTicketStatus = 'Queued' | 'Calling' | 'Voicemail' | 'Failed' | 'Resolved'
+
+/**
+ * The raw Ticket.status is only Incoming|In Progress|Resolved. Outbound work needs a
+ * finer state (Queued / Calling / Voicemail / Failed / Resolved) which lives on the
+ * linked Call's status+outcome — derive it here so the board, table, and badges agree.
+ */
+export function deriveOutboundTicketStatus(
+  ticketStatus: string,
+  call: { status: string; outcome: string | null } | null | undefined
+): OutboundTicketStatus {
+  if (ticketStatus === 'Resolved') return 'Resolved'
+  if (!call) return 'Queued'
+  if (call.outcome === 'no-answer') return 'Voicemail'
+  if (call.outcome === 'failed' || call.status === 'failed') return 'Failed'
+  if (call.outcome === 'success' || call.outcome === 'partial') return 'Resolved'
+  if (call.status === 'completed') return 'Resolved' // finished, outcome not stamped
+  return 'Calling' // dispatching | ringing | in-progress
+}
+
 export async function createTicket(
   ownerId: string,
   data: {
@@ -49,7 +96,7 @@ export async function createTicket(
   })
 }
 
-export async function getAllTickets(ownerId: string, filters: TicketFilters = {}): Promise<Ticket[]> {
+export async function getAllTickets(ownerId: string, filters: TicketFilters = {}): Promise<TicketWithLinks[]> {
   return prisma.ticket.findMany({
     where: {
       ownerId,
@@ -58,13 +105,14 @@ export async function getAllTickets(ownerId: string, filters: TicketFilters = {}
       ...(filters.customerId ? { customerId: filters.customerId } : {}),
     },
     orderBy: { createdAt: 'desc' },
+    include: ticketListInclude,
   })
 }
 
-export async function getTicket(ownerId: string, id: string): Promise<Ticket | null> {
+export async function getTicket(ownerId: string, id: string): Promise<TicketDetail | null> {
   // Filter by both id AND ownerId — ticket ids are uuids, but scoping by owner is the
   // IDOR guard that keeps one tenant from reading another's ticket by id.
-  return prisma.ticket.findFirst({ where: { id, ownerId } })
+  return prisma.ticket.findFirst({ where: { id, ownerId }, include: ticketDetailInclude })
 }
 
 export async function getTicketByCallId(ownerId: string, callId: string): Promise<Ticket | null> {

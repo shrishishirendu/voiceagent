@@ -87,6 +87,9 @@ export type CustomerDetail = {
     amountDue: number | null
     currency: string | null
     status: string
+    sourceFilePath: string | null
+    toNumber: string | null
+    groupKey: string
   }[]
   tickets: {
     id: string
@@ -119,7 +122,7 @@ export async function getCustomer(ownerId: string, id: string): Promise<Customer
     prisma.invoice.findMany({
       where: { ownerId, customerId: id },
       orderBy: { dueDate: 'asc' },
-      select: { id: true, invoiceNumber: true, invoiceDate: true, dueDate: true, amountDue: true, currency: true, status: true },
+      select: { id: true, invoiceNumber: true, invoiceDate: true, dueDate: true, amountDue: true, currency: true, status: true, sourceFilePath: true, toNumber: true, groupKey: true },
     }),
     prisma.ticket.findMany({
       where: { ownerId, customerId: id },

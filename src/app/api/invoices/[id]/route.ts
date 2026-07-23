@@ -22,7 +22,7 @@ const PatchSchema = z.object({
   swiftCode: z.string().max(20).nullish(),
   remittanceName: z.string().max(120).nullish(),
   remittanceContact: z.string().max(120).nullish(),
-  status: z.enum(["pending"]).optional(),
+  status: z.enum(["stored", "pending", "cancelled"]).optional(),
   chaseAfter: z.string().datetime().optional(),
 });
 

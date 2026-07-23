@@ -13,6 +13,15 @@ export function IconChart({ className = 'w-4 h-4' }: IconProps) {
   );
 }
 
+export function IconTicket({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h11A1.5 1.5 0 0 1 17 6.5V8a1.5 1.5 0 0 0 0 4v1.5A1.5 1.5 0 0 1 15.5 15h-11A1.5 1.5 0 0 1 3 13.5V12a1.5 1.5 0 0 0 0-4V6.5Z" />
+      <path d="M11.5 5.5v9" strokeDasharray="1.5 1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconGrid({ className = 'w-4 h-4' }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
