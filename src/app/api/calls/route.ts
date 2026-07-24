@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { resolveAccess, unauthorized } from "@/lib/access";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+
   const calls = await prisma.call.findMany({
+    where: { ownerId: access.ownerId },
     orderBy: { createdAt: "desc" },
     take: 50,
   });
@@ -20,7 +25,7 @@ export async function GET() {
       result: c.result,
       summary: c.summary,
       durationSec: c.durationSec,
-      transcript: (() => { try { return c.transcript ? JSON.parse(c.transcript) : []; } catch { return []; } })(),
+      transcript: Array.isArray(c.transcript) ? c.transcript : [],
       recordingUrl: c.recordingUrl,
       endedReason: c.endedReason ?? null,
       voicemailScript: c.voicemailScript ?? null,

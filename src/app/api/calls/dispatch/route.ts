@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { dispatchVapiCall, buildVoicemailMessage } from "@/lib/vapi";
+import { dispatchVapiCall, buildVoicemailMessage, getVoiceLanguage, getVoiceGender } from "@/lib/vapi";
+import { resolveCustomerId } from "@/lib/dispatcher";
+import { createTicket } from "@/lib/tickets";
+import { resolveDispatchConfig } from "@/lib/credentials";
+import { resolveAccess, hasRole, unauthorized, forbidden } from "@/lib/access";
 
 const MAX_ACTIVE_CALLS = Number(process.env.MAX_CONCURRENT_CALLS ?? "1");
 const ACTIVE_STATUSES = ["dispatching", "ringing", "in-progress"];
@@ -27,7 +31,7 @@ const BriefSchema = z.object({
   contactPerson: z.string().max(120).optional(),
   toNumber: z.string().min(6).max(20).regex(/^\+?[0-9 \-()]+$/, "Must be a phone number"),
   objective: z.string().min(10).max(2000),
-  voice: z.enum(["marcus", "iris", "theo"]).default("iris"),
+  voice: z.enum(["iris", "arjun", "theo"]).default("iris"),
   manner: z.enum(["warm", "crisp", "formal"]).default("warm"),
   userName: z.string().min(1).max(60).default("the caller"),
   invoiceNumber: z.string().optional(),
@@ -47,6 +51,11 @@ const BriefSchema = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+  if (!hasRole(access, "agent")) return forbidden();
+  const ownerId = access.ownerId;
+
   let body: unknown;
   try {
     body = await req.json();
@@ -86,18 +95,12 @@ export async function POST(req: NextRequest) {
     remittanceContact,
   } = parsed.data;
   const normalisedNumber = normalisePhone(toNumber);
-  const voicemailScript = buildVoicemailMessage({ contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate });
+  const voicemailScript = buildVoicemailMessage({ contactBusiness, userName, invoiceNumber, amountDue, currency, dueDate, language: getVoiceLanguage(voice), gender: getVoiceGender(voice) });
 
-  // Required env
-  const missing: string[] = [];
-  if (!process.env.VAPI_PRIVATE_KEY) missing.push("VAPI_PRIVATE_KEY");
-  if (!process.env.TWILIO_ACCOUNT_SID) missing.push("TWILIO_ACCOUNT_SID");
-  if (!process.env.TWILIO_AUTH_TOKEN) missing.push("TWILIO_AUTH_TOKEN");
-  if (!process.env.TWILIO_PHONE_NUMBER) missing.push("TWILIO_PHONE_NUMBER");
-  if (!process.env.ANTHROPIC_API_KEY) missing.push("ANTHROPIC_API_KEY");
-  if (!process.env.PUBLIC_URL) missing.push("PUBLIC_URL");
+  // Per-tenant outbound config (own keys + caller-id, env fallback) — Phase 3-G.
+  const { config: cfg, missing } = await resolveDispatchConfig(ownerId);
   if (missing.length) {
-    console.error("[dispatch] missing env vars:", missing.join(", "));
+    console.error("[dispatch] missing config:", missing.join(", "));
     return NextResponse.json(
       { error: "Server configuration error. Contact the administrator." },
       { status: 500 }
@@ -111,6 +114,7 @@ export async function POST(req: NextRequest) {
   const STALE_MS = 15 * 60 * 1000;
   await prisma.call.updateMany({
     where: {
+      ownerId,
       status: { in: ["dispatching", "ringing", "in-progress"] },
       createdAt: { lte: new Date(Date.now() - STALE_MS) },
     },
@@ -119,6 +123,7 @@ export async function POST(req: NextRequest) {
 
   const activeCount = await prisma.call.count({
     where: {
+      ownerId,
       status: { in: ACTIVE_STATUSES },
       createdAt: { gte: new Date(Date.now() - ACTIVE_CUTOFF_MS) },
     },
@@ -130,23 +135,33 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // 1. Save the brief to DB first, so we have a row even if Vapi fails
+  // 1. Save the brief to DB first, so we have a row even if Vapi fails.
+  //    Resolve (or create) the debtor Customer so the call is linked to one.
   let call;
   try {
+    const customerId = await resolveCustomerId(prisma, {
+      ownerId,
+      abn,
+      businessName: contactBusiness,
+      contactPerson,
+      phone: normalisedNumber,
+    });
     call = await prisma.call.create({
       data: {
+        ownerId,
+        customerId,
         contactBusiness,
         contactPerson,
         toNumber: normalisedNumber,
         objective,
         voice,
         manner,
+        userName,
         invoiceNumber,
         invoiceDate,
         dueDate,
         amountDue,
         currency,
-        lineItems,
         invoiceNotes,
         bankName,
         bsb,
@@ -164,9 +179,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Failed to create call record" }, { status: 500 });
   }
 
+  // 1b. Create the outbound Ticket for this manual call (EnvoyIn-shaped, tagged
+  //     "outbound"). Mirrors the scheduler path in dispatcher.dispatchInvoiceGroup.
+  await createTicket(ownerId, {
+    customerId: call.customerId,
+    callId: call.id,
+    channel: "phone",
+    status: "In Progress",
+    title: `Outbound call — ${contactBusiness}`,
+    requester: contactBusiness,
+    tags: ["outbound"],
+  });
+
   // 2. Dispatch via Vapi
   try {
     const vapiCall = await dispatchVapiCall({
+      ownerId,
       toNumber: normalisedNumber,
       contactBusiness,
       contactPerson,
@@ -188,11 +216,12 @@ export async function POST(req: NextRequest) {
       abn,
       remittanceName,
       remittanceContact,
-      twilioPhoneNumber: process.env.TWILIO_PHONE_NUMBER!,
-      twilioAccountSid: process.env.TWILIO_ACCOUNT_SID!,
-      twilioAuthToken: process.env.TWILIO_AUTH_TOKEN!,
-      publicUrl: process.env.PUBLIC_URL!,
-      anthropicKey: process.env.ANTHROPIC_API_KEY!,
+      twilioPhoneNumber: cfg.twilioPhoneNumber,
+      twilioAccountSid: cfg.twilioAccountSid,
+      twilioAuthToken: cfg.twilioAuthToken,
+      publicUrl: cfg.publicUrl,
+      anthropicKey: cfg.anthropicKey,
+      vapiPrivateKey: cfg.vapiPrivateKey,
     });
 
     await prisma.call.update({

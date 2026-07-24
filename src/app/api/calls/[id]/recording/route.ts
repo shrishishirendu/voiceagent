@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { resolveAccess, unauthorized } from "@/lib/access";
 
 export async function GET(
   _req: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  const call = await prisma.call.findUnique({ where: { id: params.id } });
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+
+  const call = await prisma.call.findFirst({ where: { id: params.id, ownerId: access.ownerId } });
   if (!call) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }

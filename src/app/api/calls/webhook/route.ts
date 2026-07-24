@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { MAX_INVOICE_ATTEMPTS, getSettings, backfillCustomerFromCall } from "@/lib/dispatcher";
+import { getTicketByCallId, updateTicket } from "@/lib/tickets";
+import { sendPostCallSms } from "@/lib/sms";
 
 /**
  * Vapi webhook receiver.
@@ -58,16 +61,16 @@ function deriveOutcome(endedReason?: string, successEval?: string): string {
   return "success";
 }
 
-function formatTranscript(messages?: VapiMessage["messages"]): string {
-  if (!messages || messages.length === 0) return JSON.stringify([]);
-  const formatted = messages
+// Returns a plain array for the Call.transcript jsonb column.
+function formatTranscript(messages?: VapiMessage["messages"]): { who: string; text: string }[] {
+  if (!messages || messages.length === 0) return [];
+  return messages
     .filter((m) => m.role === "assistant" || m.role === "user" || m.role === "bot")
     .map((m) => ({
       who: m.role === "user" ? "them" : "envoy",
       text: m.message ?? m.content ?? "",
     }))
     .filter((m) => m.text.length > 0);
-  return JSON.stringify(formatted);
 }
 
 export async function POST(req: NextRequest) {
@@ -93,16 +96,22 @@ export async function POST(req: NextRequest) {
 
   const vapiCallId = msg.call.id;
 
+  // Tenant carried in the webhook URL (?owner=<ownerId>) by vapi.ts — used only to
+  // scope the unbound-call fallback below so an early event can't bind to another
+  // tenant's in-flight call. The authoritative tenant is call.ownerId once matched.
+  const ownerHint = req.nextUrl.searchParams.get("owner");
+
   // Find our local call record
   let call;
   try {
     call = await prisma.call.findUnique({ where: { vapiCallId } });
     // Race: vapiCallId may arrive before the dispatch route writes it.
     // Attempt to bind this event to the most recent unbound in-flight call (within 2 min).
-    // Safe under MAX_CONCURRENT_CALLS=1 — at most one unbound call at a time.
+    // Safe under MAX_CONCURRENT_CALLS=1 per tenant — at most one unbound call at a time.
     if (!call) {
       const candidate = await prisma.call.findFirst({
         where: {
+          ...(ownerHint ? { ownerId: ownerHint } : {}),
           vapiCallId: null,
           status: { in: ["dispatching", "ringing"] },
           createdAt: { gte: new Date(Date.now() - 2 * 60 * 1000) },
@@ -210,6 +219,90 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         console.error("[webhook] end-of-call-report DB write failed", err);
         return NextResponse.json({ ok: false, error: "db error" }, { status: 500 });
+      }
+
+      // Load settings once for retry delay, SMS flag, and auto-retry toggle.
+      let retryDelayHours = 24;
+      let smsEnabled = false;
+      let autoRetry = true;
+      try {
+        const settings = await getSettings(call.ownerId);
+        retryDelayHours = settings.retryDelayHours ?? 24;
+        smsEnabled = settings.smsEnabled ?? false;
+        autoRetry = settings.autoRetry ?? true;
+      } catch {
+        // keep defaults
+      }
+
+      // Resolve or requeue any invoices aggregated into this call. A reached contact
+      // (success/partial) settles them; no-answer/failed requeues under the attempt cap
+      // (chaseAfter = configurable retryDelayHours out; the business-hours gate still applies).
+      // When autoRetry is off, failed/no-answer invoices are marked failed immediately instead.
+      try {
+        const links = await prisma.callInvoice.findMany({
+          where: { callId: call.id },
+          select: { invoiceId: true },
+        });
+        const linkedIds = links.map((l) => l.invoiceId);
+        if (outcome === "success" || outcome === "partial") {
+          await prisma.invoice.updateMany({
+            where: { id: { in: linkedIds }, ownerId: call.ownerId, status: "calling" },
+            data: { status: "resolved" },
+          });
+        } else {
+          const linked = await prisma.invoice.findMany({ where: { id: { in: linkedIds }, ownerId: call.ownerId, status: "calling" } });
+          for (const inv of linked) {
+            if (!autoRetry || inv.attempts >= MAX_INVOICE_ATTEMPTS) {
+              await prisma.invoice.update({ where: { id: inv.id }, data: { status: "failed" } });
+            } else {
+              await prisma.invoice.update({
+                where: { id: inv.id },
+                data: {
+                  status: "pending",
+                  chaseAfter: new Date(Date.now() + retryDelayHours * 60 * 60 * 1000),
+                },
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[webhook] invoice resolution failed", err);
+      }
+
+      // Update the outbound Ticket linked to this call (1D): a reached contact resolves
+      // it, otherwise it stays In Progress. Also stamp transcript/summary onto the ticket.
+      try {
+        const ticket = await getTicketByCallId(call.ownerId, call.id);
+        if (ticket) {
+          const ticketStatus = outcome === "success" || outcome === "partial" ? "Resolved" : "In Progress";
+          await updateTicket(call.ownerId, ticket.id, {
+            status: ticketStatus,
+            transcript,
+            aiSummary: summary,
+          });
+        }
+      } catch (err) {
+        console.error("[webhook] ticket update failed", err);
+      }
+
+      // Backfill the debtor Customer with any corrected contact facts learned on the
+      // call (1E) — owner-scoped, best-effort.
+      try {
+        await backfillCustomerFromCall(call.ownerId, call.id);
+      } catch (err) {
+        console.error("[webhook] customer backfill failed", err);
+      }
+
+      // SMS follow-up — fire and forget; never let SMS failure affect webhook response.
+      console.log("[sms] check: smsEnabled=%s toNumber=%s outcome=%s", smsEnabled, call.toNumber ?? "(null)", outcome);
+      if (smsEnabled && call.toNumber) {
+        console.log("[sms] firing for call", call.id);
+        sendPostCallSms({ ...call, userName: call.userName ?? "our client" }, outcome).catch((err) =>
+          console.error("[webhook] SMS send failed:", err)
+        );
+      } else {
+        if (!smsEnabled) console.log("[sms] skipped — smsEnabled is false in settings");
+        if (!call.toNumber) console.log("[sms] skipped — toNumber is null for call", call.id);
       }
       break;
     }

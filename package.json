@@ -1,33 +1,47 @@
 {
-  "name": "envoy",
+  "name": "envoy-demo3",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "next dev -p 3010",
+    "dev:all": "concurrently -n web,worker -c blue,magenta \"npm:dev\" \"npm:scheduler\"",
+    "scheduler": "tsx scripts/scheduler.ts",
+    "import:invoices": "tsx scripts/import-invoices.ts",
+    "seed:demo": "tsx scripts/seed-demo.ts",
+    "seed:crm": "tsx scripts/seed-crm-details.ts",
     "build": "prisma generate && next build",
-    "start": "next start",
+    "start": "next start -p 3010",
     "lint": "next lint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
-    "tunnel": "ngrok http 3000"
+    "tunnel": "ngrok http 3010"
   },
   "dependencies": {
     "@prisma/client": "^5.20.0",
-    "googleapis": "^173.0.0",
+    "@supabase/supabase-js": "^2.110.7",
+    "dotenv": "^16.4.5",
+    "framer-motion": "^12.42.2",
     "next": "14.2.15",
+    "next-auth": "^5.0.0-beta.31",
+    "node-cron": "^3.0.3",
+    "pdf-parse": "^1.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "xlsx": "^0.18.5",
+    "resend": "^6.18.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",
+    "@types/node-cron": "^3.0.11",
     "@types/react": "^18.3.11",
     "@types/react-dom": "^18.3.0",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.0.1",
+    "playwright": "^1.61.1",
     "postcss": "^8.4.47",
     "prisma": "^5.20.0",
     "tailwindcss": "^3.4.13",
+    "tsx": "^4.19.1",
     "typescript": "^5.6.2"
   }
 }

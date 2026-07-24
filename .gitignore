@@ -6,9 +6,9 @@ out/
 .env*.local
 *.db
 *.db-journal
-prisma/envoy.db*
+prisma/envoy-demo3.db*
 .vercel
 .DS_Store
 *.log
-CLAUDE.md
-
+tsconfig.tsbuildinfo
+.playwright-mcp/
