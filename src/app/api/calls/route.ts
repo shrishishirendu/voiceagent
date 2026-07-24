@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { resolveAccess, unauthorized } from "@/lib/access";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const access = await resolveAccess();
   if (!access) return unauthorized();
