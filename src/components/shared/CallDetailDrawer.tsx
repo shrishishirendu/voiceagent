@@ -5,6 +5,7 @@ import { Drawer } from './Drawer';
 import { LoadingOverlay } from './Spinner';
 import { CallOutcomeBadge } from './Badge';
 import { fmtWhen, fmtDuration, fmtAmount, fmtDate } from '@/lib/format';
+import { sumAmountsByCurrency, fmtMoneyByCurrency } from '@/lib/money';
 import type { Call, LinkedInvoice, TranscriptLine } from '@/lib/client-types';
 
 // Voicemail detection — ported verbatim from demo2.0's Detail() (src/app/page.tsx lines 1687-1691).
@@ -86,7 +87,7 @@ export function CallDetailDrawer({ callId, onClose }: { callId: string | null; o
 
   const isInvoice = !!call?.invoiceNumber;
   const linkedInvoices: LinkedInvoice[] = call?.invoices ?? [];
-  const aggregateTotal = linkedInvoices.reduce((s, i) => s + (i.amountDue ?? 0), 0);
+  const aggregateTotal = fmtMoneyByCurrency(sumAmountsByCurrency(linkedInvoices));
   const voicemail = call ? isVoicemailCall(call) : false;
   const vmLines = call && voicemail ? voicemailLinesFor(call) : [];
 
@@ -134,7 +135,7 @@ export function CallDetailDrawer({ callId, onClose }: { callId: string | null; o
           {linkedInvoices.length > 1 && (
             <section>
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-2">
-                {linkedInvoices.length} invoices · {fmtAmount(linkedInvoices[0]?.currency, aggregateTotal)}
+                {linkedInvoices.length} invoices · {aggregateTotal}
               </p>
               <div className="flex flex-col gap-1.5">
                 {linkedInvoices.map((inv) => (

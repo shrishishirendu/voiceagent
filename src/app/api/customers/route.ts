@@ -14,15 +14,25 @@ export async function GET() {
 
 const CreateSchema = z.object({
   businessName: z.string().min(1).max(200),
+  accountCode: z.string().max(60).nullish(),
   contactPerson: z.string().max(200).nullish(),
   contactPhone: z.string().max(40).nullish(),
   email: z.string().max(200).nullish(),
+  email2: z.string().max(200).nullish(),
   abn: z.string().max(40).nullish(),
   addressLine: z.string().max(300).nullish(),
   city: z.string().max(120).nullish(),
   state: z.string().max(120).nullish(),
   postCode: z.string().max(20).nullish(),
   deliveryInstructions: z.string().max(1000).nullish(),
+  paymentTermsDays: z.number().int().min(0).max(365).nullish(),
+  creditLimit: z.number().min(0).nullish(),
+  ignoreMinPrice: z.boolean().optional(),
+  ignoreProductMinPrice: z.boolean().optional(),
+  hideInvoice: z.boolean().optional(),
+  isActive: z.boolean().optional(),
+  salesPersonId: z.string().uuid().nullish(),
+  locationId: z.string().uuid().nullish(),
 })
 
 export async function POST(req: NextRequest) {

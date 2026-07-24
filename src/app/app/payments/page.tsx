@@ -10,13 +10,14 @@ import { PanelSkeleton } from '@/components/shared/Skeleton';
 import { useAddToast } from '@/components/shared/Toast';
 import { IconPlus } from '@/components/shared/Icons';
 import { fmtAmount, fmtWhen } from '@/lib/format';
+import { fmtMoneyByCurrency, type MoneyByCurrency } from '@/lib/money';
 
 type LedgerEntry = {
   id: string; source: 'ar' | 'inbound'; customerId: string | null; customerName: string | null;
   invoiceId: string | null; invoiceNumber: string | null; amount: number; currency: string | null;
   date: string; type: string | null; note: string | null;
 };
-type Summary = { totalReceived: number; totalCredits: number; outstanding: number; entryCount: number };
+type Summary = { totalReceived: number; totalCredits: number; outstanding: MoneyByCurrency; entryCount: number };
 type OpenInvoice = { id: string; invoiceNumber: string | null; contactBusiness: string; amountDue: number | null; currency: string | null };
 
 function StatTile({ label, value, tone }: { label: string; value: string; tone?: 'emerald' | 'amber' | 'slate' }) {
@@ -67,7 +68,7 @@ export default function PaymentsPage() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <StatTile label="Received" value={fmtAmount('AUD', summary.totalReceived) || '$0'} tone="emerald" />
           <StatTile label="Credits" value={fmtAmount('AUD', summary.totalCredits) || '$0'} tone="slate" />
-          <StatTile label="Outstanding" value={fmtAmount('AUD', summary.outstanding) || '$0'} tone="amber" />
+          <StatTile label="Outstanding" value={fmtMoneyByCurrency(summary.outstanding ?? [])} tone="amber" />
         </div>
 
         {ledger.length === 0 ? (

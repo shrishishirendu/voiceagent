@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma'
+import { sumOutstandingByCurrency, type MoneyByCurrency } from '@/lib/money'
 
 // Unified payments ledger (Phase 3-F). demo3.0 tracks *received* payments against
 // invoices in the `payment` table (AR); EnvoyIn tracks *inbound-initiated* Stripe
@@ -23,11 +24,9 @@ export type LedgerEntry = {
 export type PaymentSummary = {
   totalReceived: number
   totalCredits: number
-  outstanding: number
+  outstanding: MoneyByCurrency // unpaid + past-due amounts, bucketed per currency
   entryCount: number
 }
-
-const OPEN_INVOICE_STATUSES = ['pending', 'queued', 'calling', 'failed']
 
 // A ticket's `payment` jsonb counts as an inbound payment when it records a non-zero
 // amount (mirrors EnvoyIn's Stripe blob shape: { amount, currency, status, paidAt }).
@@ -93,22 +92,22 @@ export async function getPaymentsLedger(ownerId: string, customerId?: string): P
 }
 
 export async function getPaymentSummary(ownerId: string, customerId?: string): Promise<PaymentSummary> {
-  const [agg, outstandingAgg, ledger] = await Promise.all([
+  const [agg, openInvoices, ledger] = await Promise.all([
     prisma.payment.aggregate({
       where: { ownerId, ...(customerId ? { invoice: { customerId } } : {}) },
       _sum: { payAmount: true, creditAmount: true },
     }),
-    prisma.invoice.aggregate({
-      where: { ownerId, status: { in: OPEN_INVOICE_STATUSES }, ...(customerId ? { customerId } : {}) },
-      _sum: { amountDue: true, paidAmount: true },
+    // Outstanding = unpaid + past-due, computed in code (multi-currency; text due dates).
+    prisma.invoice.findMany({
+      where: { ownerId, ...(customerId ? { customerId } : {}) },
+      select: { amountDue: true, paidAmount: true, currency: true, dueDate: true, status: true },
     }),
     getPaymentsLedger(ownerId, customerId),
   ])
-  const outstanding = (outstandingAgg._sum.amountDue ?? 0) - (outstandingAgg._sum.paidAmount ?? 0)
   return {
     totalReceived: agg._sum.payAmount ?? 0,
     totalCredits: agg._sum.creditAmount ?? 0,
-    outstanding: Math.max(0, outstanding),
+    outstanding: sumOutstandingByCurrency(openInvoices),
     entryCount: ledger.length,
   }
 }

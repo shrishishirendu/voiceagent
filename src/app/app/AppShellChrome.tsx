@@ -2,18 +2,16 @@
 
 import { useState, useEffect } from 'react';
 import { usePathname } from 'next/navigation';
+import { signOut } from 'next-auth/react';
 import Link from 'next/link';
 import { EnvoyLogo, IsoftLogo } from '@/components/shared/Logo';
-import { IconGrid, IconPhone, IconUpload, IconCalendar, IconGear, IconChevronRight, IconUsers, IconChart, IconWallet, IconTrend, IconPie, IconTicket } from '@/components/shared/Icons';
+import { IconGrid, IconUpload, IconCalendar, IconGear, IconChevronRight, IconUsers, IconWallet, IconTrend, IconPie, IconLogout } from '@/components/shared/Icons';
 import { SchedulerStatusPill } from './SchedulerStatusPill';
 
 const NAV = [
-  { id: 'dashboard', label: 'Home', icon: IconGrid, href: '/app/dashboard' },
-  { id: 'outbound', label: 'Outbound', icon: IconChart, href: '/app/outbound' },
-  { id: 'tickets', label: 'Tickets', icon: IconTicket, href: '/app/tickets' },
+  { id: 'dashboard', label: 'Dashboard', icon: IconGrid, href: '/app/dashboard' },
   { id: 'forecasting', label: 'Forecast', icon: IconTrend, href: '/app/forecasting' },
   { id: 'analytics', label: 'Analytics', icon: IconPie, href: '/app/analytics' },
-  { id: 'calls', label: 'New Call', icon: IconPhone, href: '/app/calls/new', iconKey: 'new-call' },
   { id: 'invoices', label: 'Invoices', icon: IconUpload, href: '/app/invoices/select' },
   { id: 'queue', label: 'Queue', icon: IconCalendar, href: '/app/queue' },
   { id: 'customers', label: 'Customers', icon: IconUsers, href: '/app/customers' },
@@ -51,8 +49,8 @@ export function AppShellChrome({ children }: { children: React.ReactNode }) {
           </button>
         </div>
 
-        <nav className="flex flex-col gap-1.5">
-          {NAV.map(({ id, label, icon: Icon, href, iconKey }) => (
+        <nav className="flex flex-col gap-1.5 flex-1 min-h-0 overflow-y-auto -mr-1.5 pr-1.5">
+          {NAV.map(({ id, label, icon: Icon, href }) => (
             <Link
               key={id}
               href={href}
@@ -61,7 +59,7 @@ export function AppShellChrome({ children }: { children: React.ReactNode }) {
                 collapsed ? 'px-0 justify-center' : 'px-3.5'
               } ${activeId === id ? 'nav-active' : 'text-white/50 hover:text-white/80 hover:bg-white/5'}`}
             >
-              <span className={`nav-icon nav-icon-${iconKey ?? id} inline-flex flex-none`}>
+              <span className={`nav-icon nav-icon-${id} inline-flex flex-none`}>
                 <Icon className="w-5 h-5" />
               </span>
               {!collapsed && <span className="whitespace-nowrap">{label}</span>}
@@ -69,7 +67,17 @@ export function AppShellChrome({ children }: { children: React.ReactNode }) {
           ))}
         </nav>
 
-        <div className={`mt-auto ${collapsed ? 'px-0' : 'px-2'}`}>
+        <div className={`flex-none mt-3 pt-3 border-t border-white/10 ${collapsed ? 'px-0' : 'px-2'}`}>
+          <button
+            onClick={() => signOut({ callbackUrl: '/login' })}
+            title={collapsed ? 'Sign out' : undefined}
+            className={`nav-btn flex items-center gap-3.5 w-full py-2.5 mb-3 rounded-xl text-sm font-medium text-white/50 hover:text-white/90 hover:bg-white/5 transition-all duration-100 ${
+              collapsed ? 'px-0 justify-center' : 'px-3.5'
+            }`}
+          >
+            <IconLogout className="w-5 h-5 flex-none" />
+            {!collapsed && <span className="whitespace-nowrap">Sign out</span>}
+          </button>
           <div className={`mb-3 pb-3 border-b border-white/10 ${collapsed ? 'flex justify-center' : ''}`}>
             <SchedulerStatusPill collapsed={collapsed} />
           </div>

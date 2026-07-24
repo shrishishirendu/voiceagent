@@ -207,6 +207,7 @@ export default function SettingsPage() {
                   <button
                     key={d.iso}
                     type="button"
+                    aria-pressed={dayActive(d.iso)}
                     onClick={() => toggleDay(d.iso)}
                     className={`pill border transition-colors duration-150 ${
                       dayActive(d.iso)

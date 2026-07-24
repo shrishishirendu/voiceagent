@@ -35,7 +35,7 @@ export function Drawer({
         {title && (
           <div className="flex-none flex items-center justify-between px-5 py-4 border-b border-slate-100">
             <div className="text-sm font-bold text-slate-900">{title}</div>
-            <button onClick={onClose} className="btn-ghost !p-1.5 rounded-lg">
+            <button onClick={onClose} aria-label="Close" className="btn-ghost !p-1.5 rounded-lg">
               <IconX className="w-4 h-4" />
             </button>
           </div>

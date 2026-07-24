@@ -8,6 +8,7 @@ import type {
   BulkFormState,
 } from '@/lib/client-types';
 import { fmtAmount, fmtDate } from '@/lib/format';
+import { sumAmountsByCurrency, fmtMoneyByCurrency } from '@/lib/money';
 import { companyNamesMatch } from '@/lib/nameUtils';
 import { Button } from '@/components/shared/Button';
 import { Card, CardHeader, CardBody } from '@/components/shared/Card';
@@ -338,7 +339,7 @@ export default function QueuePage() {
 
         <div className="space-y-3">
           {groups.map((g) => {
-            const total = g.items.reduce((s, i) => s + (i.amountDue ?? 0), 0);
+            const totalByCurrency = sumAmountsByCurrency(g.items);
             const earliest = g.items.reduce((min, i) => {
               const d = i.dueDate ?? '9999-12-31';
               return d < min ? d : min;
@@ -386,7 +387,7 @@ export default function QueuePage() {
                         {g.items.length} invoice{g.items.length === 1 ? '' : 's'}
                       </span>
                       <span className="text-slate-300">·</span>
-                      <span className="font-display font-semibold text-slate-700">{fmtAmount(lead?.currency, total)}</span>
+                      <span className="font-display font-semibold text-slate-700">{fmtMoneyByCurrency(totalByCurrency)}</span>
                       {g.items.length > 1 && earliest !== '9999-12-31' && (
                         <>
                           <span className="text-slate-300">·</span>
@@ -403,6 +404,9 @@ export default function QueuePage() {
                       )}
                       {!isCalling && !hasNoPhone && chaseInFuture && !isRetry && (
                         <span className="text-slate-400">Chase from {fmtDate(earliestChaseAfter.toISOString().slice(0, 10))}</span>
+                      )}
+                      {!isCalling && !eligibleNow && !hasNoPhone && !chaseInFuture && (
+                        <span className="text-slate-400">No invoice ready to dispatch in this group.</span>
                       )}
                       {isCalling && callId && (
                         <button

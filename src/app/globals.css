@@ -103,6 +103,75 @@
   background-size: 22px 22px;
 }
 
+/* ── gradient surfaces (ported from EnvoyIn) ── */
+/* Glossy top highlight + diagonal shine sweep on hover, for gradient surfaces */
+.gradient-shine {
+  position: relative;
+  overflow: hidden;
+}
+.gradient-shine::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.28) 0%, rgba(255,255,255,0) 50%);
+  pointer-events: none;
+}
+.gradient-shine::after {
+  content: '';
+  position: absolute;
+  top: -30%; left: -70%;
+  width: 45%; height: 160%;
+  background: linear-gradient(115deg, transparent 0%, rgba(255,255,255,0.55) 50%, transparent 100%);
+  transform: skewX(-20deg);
+  transition: left 0.65s cubic-bezier(0.22, 1, 0.36, 1);
+  pointer-events: none;
+}
+.gradient-shine:hover::after { left: 130%; }
+
+.btn-gradient {
+  @apply inline-flex items-center gap-2 px-4 py-2 text-white text-sm font-semibold rounded-xl
+         transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-brand/30
+         disabled:opacity-40 disabled:cursor-not-allowed;
+  background: linear-gradient(135deg, #ff5c5c 0%, #E31E24 45%, #a10e13 100%);
+  box-shadow: 0 2px 10px rgba(227,30,36,0.35), inset 0 1px 0 rgba(255,255,255,0.25);
+}
+.btn-gradient:hover {
+  box-shadow: 0 6px 18px rgba(227,30,36,0.45), inset 0 1px 0 rgba(255,255,255,0.3);
+  transform: translateY(-1px);
+}
+
+/* Cursor-tracking 3D tilt card, with a spotlight shine that follows the pointer */
+.tilt-card {
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.15s ease-out, box-shadow 0.2s ease;
+  will-change: transform;
+}
+.tilt-card:hover {
+  box-shadow: 0 22px 44px -14px var(--glow, rgba(227,30,36,0.5));
+}
+.tilt-shine {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: var(--glow-opacity, 0);
+  transition: opacity 0.25s ease;
+  background: radial-gradient(circle at var(--mx, 50%) var(--my, 50%),
+    rgba(255,255,255,0.85) 0%, rgba(255,255,255,0.35) 45%, transparent 80%);
+  mix-blend-mode: overlay;
+}
+
+.metric-card-interactive {
+  transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.2s ease;
+}
+.metric-card-interactive:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 12px 26px -8px var(--glow, rgba(15,23,42,0.18));
+}
+/* Fade-only entrance for the tilt card (its own transform must not be clobbered). */
+@keyframes metricFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.metric-card-fade { animation: metricFadeIn 0.35s ease both; }
+
 .nav-active {
   background: rgba(227, 30, 36, 0.2);
   color: white;

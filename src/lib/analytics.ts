@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma'
+import { localDay } from '@/lib/format'
 
 // Analytics with inbound/outbound segmentation (Phase 3-E). Tickets carry a `tags` jsonb
 // that includes "outbound" (this app) or "inbound" (EnvoyIn's tickets, once merged), so
@@ -20,10 +21,6 @@ export type Analytics = {
   outbound: SegmentStats
   inbound: SegmentStats
   perDay: { date: string; outbound: number; inbound: number }[] // last 14 days
-}
-
-function isoDay(d: Date): string {
-  return d.toISOString().slice(0, 10)
 }
 
 type Channel = 'outbound' | 'inbound' | 'other'
@@ -63,7 +60,7 @@ export async function getAnalytics(ownerId: string): Promise<Analytics> {
   for (let i = 0; i < 14; i++) {
     const d = new Date(since)
     d.setDate(since.getDate() + i)
-    perDayMap.set(isoDay(d), { outbound: 0, inbound: 0 })
+    perDayMap.set(localDay(d), { outbound: 0, inbound: 0 })
   }
 
   for (const t of tickets) {
@@ -73,7 +70,7 @@ export async function getAnalytics(ownerId: string): Promise<Analytics> {
     else if (ch === 'inbound') tallyStatus(inbound, t.status)
 
     if (ch !== 'other') {
-      const key = isoDay(new Date(t.createdAt))
+      const key = localDay(new Date(t.createdAt))
       const bucket = perDayMap.get(key)
       if (bucket) bucket[ch]++
     }

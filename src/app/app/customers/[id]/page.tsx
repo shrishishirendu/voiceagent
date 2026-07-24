@@ -6,26 +6,33 @@ import { useParams } from 'next/navigation';
 import { Card, CardBody } from '@/components/shared/Card';
 import { Button } from '@/components/shared/Button';
 import { Drawer } from '@/components/shared/Drawer';
+import { InvoiceDetailDrawer } from '@/components/shared/InvoiceDetailDrawer';
 import { Badge, Pill } from '@/components/shared/Badge';
 import { PanelSkeleton } from '@/components/shared/Skeleton';
 import { useAddToast } from '@/components/shared/Toast';
 import { IconArrowLeft, IconEdit } from '@/components/shared/Icons';
 import { fmtAmount, fmtDate, fmtWhen } from '@/lib/format';
+import { fmtMoneyByCurrency, totalMoneyMagnitude, type MoneyByCurrency } from '@/lib/money';
+
+type CustomerFields = {
+  id: string; accountCode: string | null; businessName: string; contactPerson: string | null; contactPhone: string | null;
+  email: string | null; email2: string | null; abn: string | null; addressLine: string | null; city: string | null;
+  state: string | null; postCode: string | null; deliveryInstructions: string | null;
+  paymentTermsDays: number | null; creditLimit: number | null; balanceAmount: number;
+  ignoreMinPrice: boolean; ignoreProductMinPrice: boolean; hideInvoice: boolean; isActive: boolean;
+  salesPersonId: string | null; salesPersonName: string | null;
+  locationId: string | null; locationCode: string | null; locationName: string | null;
+  invoiceCount: number; openInvoiceCount: number; ticketCount: number; callCount: number; outstanding: MoneyByCurrency;
+};
 
 type Detail = {
-  customer: {
-    id: string; businessName: string; contactPerson: string | null; contactPhone: string | null;
-    email: string | null; abn: string | null; addressLine: string | null; city: string | null;
-    state: string | null; postCode: string | null; deliveryInstructions: string | null;
-    isActive: boolean; invoiceCount: number; openInvoiceCount: number; ticketCount: number;
-    callCount: number; outstanding: number;
-  };
-  invoices: { id: string; invoiceNumber: string | null; invoiceDate: string | null; dueDate: string | null; amountDue: number | null; currency: string | null; status: string; sourceFilePath: string | null; toNumber: string | null; groupKey: string }[];
+  customer: CustomerFields;
+  invoices: { id: string; invoiceNumber: string | null; invoiceDate: string | null; dueDate: string | null; amountDue: number | null; totalAmount: number | null; paidAmount: number | null; currency: string | null; status: string; sourceFilePath: string | null; toNumber: string | null; groupKey: string }[];
   tickets: { id: string; title: string | null; channel: string; status: string; tags: string[]; aiSummary: string | null; createdAt: string }[];
   calls: { id: string; contactBusiness: string; status: string; outcome: string | null; summary: string | null; durationSec: number | null; createdAt: string }[];
 };
 
-type Tab = 'invoices' | 'tickets' | 'calls' | 'payments';
+type Tab = 'details' | 'invoices' | 'tickets' | 'calls' | 'payments';
 type PaymentEntry = { id: string; source: 'ar' | 'inbound'; invoiceNumber: string | null; amount: number; currency: string | null; date: string; type: string | null };
 
 const STATUS_CLS: Record<string, string> = {
@@ -46,10 +53,11 @@ export default function CustomerDetailPage() {
   const [data, setData] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
-  const [tab, setTab] = useState<Tab>('invoices');
+  const [tab, setTab] = useState<Tab>('details');
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [payments, setPayments] = useState<PaymentEntry[] | null>(null);
+  const [invoiceOpen, setInvoiceOpen] = useState<string | null>(null);
 
   const loadPayments = useCallback(async () => {
     if (!id) return;
@@ -111,6 +119,27 @@ export default function CustomerDetailPage() {
     }
   }, [addToast, load]);
 
+  // Reconcile — mark an invoice as paid. Records a payment for the remaining balance, which
+  // advances paidAmount and flips the invoice to resolved (so it drops out of Outstanding).
+  const markPaid = useCallback(async (invId: string, remaining: number) => {
+    setInvBusy(invId);
+    try {
+      const r = await fetch('/api/payments', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoiceId: invId, payAmount: remaining, paymentType: 'reconciled' }),
+      });
+      if (!r.ok) throw new Error('mark-paid failed');
+      addToast('Invoice marked as paid.', 'success');
+      setPayments(null); // force payments sub-tab to refetch
+      await load();
+    } catch (e) {
+      console.error(e);
+      addToast('Could not mark as paid.', 'error');
+    } finally {
+      setInvBusy(null);
+    }
+  }, [addToast, load]);
+
   if (loading) return <div className="p-8"><PanelSkeleton /></div>;
   if (notFound || !data) {
     return (
@@ -123,7 +152,7 @@ export default function CustomerDetailPage() {
 
   const c = data.customer;
   const address = [c.addressLine, c.city, c.state, c.postCode].filter(Boolean).join(', ');
-  const counts: Record<Tab, number> = { invoices: data.invoices.length, tickets: data.tickets.length, calls: data.calls.length, payments: 0 };
+  const counts: Record<Tab, number> = { details: 0, invoices: data.invoices.length, tickets: data.tickets.length, calls: data.calls.length, payments: 0 };
 
   return (
     <div className="h-full flex flex-col">
@@ -143,37 +172,51 @@ export default function CustomerDetailPage() {
           <div className="flex-none flex items-center gap-3">
             <div className="text-right">
               <p className="text-xs text-slate-400">Outstanding</p>
-              <p className="text-lg font-semibold text-slate-900">{c.outstanding > 0 ? fmtAmount('AUD', c.outstanding) : '—'}</p>
+              <p className="text-lg font-semibold text-slate-900">{totalMoneyMagnitude(c.outstanding ?? []) > 0 ? fmtMoneyByCurrency(c.outstanding) : '—'}</p>
             </div>
             <Button variant="secondary" icon={<IconEdit className="w-4 h-4" />} onClick={() => setEditing(true)}>Edit</Button>
           </div>
         </div>
 
         <div className="mt-5 flex gap-1">
-          {(['invoices', 'tickets', 'calls', 'payments'] as Tab[]).map((t) => (
+          {(['details', 'invoices', 'tickets', 'calls', 'payments'] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={`px-3.5 py-1.5 rounded-lg text-sm font-medium capitalize transition-colors ${tab === t ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'}`}
             >
-              {t} {t !== 'payments' && <span className={tab === t ? 'text-white/60' : 'text-slate-400'}>{counts[t]}</span>}
+              {t} {t !== 'payments' && t !== 'details' && <span className={tab === t ? 'text-white/60' : 'text-slate-400'}>{counts[t]}</span>}
             </button>
           ))}
         </div>
       </header>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-8 py-6">
+        {tab === 'details' && <DetailsTab c={c} />}
+
         {tab === 'invoices' && (
           <TabList empty={data.invoices.length === 0} emptyText="No invoices for this customer.">
             {data.invoices.map((inv) => {
               const canDispatch = inv.status === 'stored' || inv.status === 'pending';
+              const paid = inv.paidAmount ?? 0;
+              const total = inv.totalAmount ?? inv.amountDue ?? 0;
+              const remaining = Math.max(0, (inv.amountDue ?? 0) - paid);
+              const canMarkPaid = inv.status !== 'cancelled' && remaining > 0;
               return (
                 <div key={inv.id} className="flex items-center justify-between gap-4 px-4 py-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-slate-900 truncate">{inv.invoiceNumber || 'No number'}</p>
-                    <p className="text-xs text-slate-400 mt-0.5">{inv.dueDate ? `Due ${fmtDate(inv.dueDate)}` : 'No due date'}</p>
-                  </div>
+                  <button onClick={() => setInvoiceOpen(inv.id)} className="min-w-0 flex-1 text-left group">
+                    <p className="text-sm font-medium text-slate-900 truncate group-hover:text-brand transition-colors">{inv.invoiceNumber || 'No number'}</p>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {inv.invoiceDate ? fmtDate(inv.invoiceDate) : 'No date'}
+                      {inv.dueDate ? ` · due ${fmtDate(inv.dueDate)}` : ''}
+                    </p>
+                  </button>
                   <div className="flex items-center gap-3">
+                    <div className="hidden md:flex items-center gap-5 text-right">
+                      <div><p className="text-[9px] uppercase tracking-wider text-slate-400">Total</p><p className="text-sm text-slate-800 tabular-nums">{fmtAmount(inv.currency, total) || '—'}</p></div>
+                      <div><p className="text-[9px] uppercase tracking-wider text-slate-400">Paid</p><p className="text-sm text-emerald-700 tabular-nums">{fmtAmount(inv.currency, paid) || '—'}</p></div>
+                      <div><p className="text-[9px] uppercase tracking-wider text-slate-400">Balance</p><p className={`text-sm tabular-nums ${remaining > 0 ? 'text-brand' : 'text-slate-800'}`}>{fmtAmount(inv.currency, remaining) || '—'}</p></div>
+                    </div>
                     {inv.sourceFilePath && (
                       <a
                         href={`/api/files/invoice?path=${encodeURIComponent(inv.sourceFilePath)}`}
@@ -185,19 +228,18 @@ export default function CustomerDetailPage() {
                         PDF
                       </a>
                     )}
-                    <span className="text-sm font-medium text-slate-800">{fmtAmount(inv.currency, inv.amountDue) || '—'}</span>
                     <StatusPill status={inv.status} />
-                    {canDispatch && (
-                      <div className="flex items-center gap-1.5">
-                        {inv.status === 'stored' && (
-                          <button
-                            className="btn-ghost text-xs !py-1 !px-2"
-                            disabled={invBusy === inv.id}
-                            onClick={() => enqueueInvoice(inv.id, false, inv.groupKey, inv.toNumber)}
-                          >
-                            {invBusy === inv.id ? '…' : 'Queue'}
-                          </button>
-                        )}
+                    <div className="flex items-center gap-1.5">
+                      {canDispatch && inv.status === 'stored' && (
+                        <button
+                          className="btn-ghost text-xs !py-1 !px-2"
+                          disabled={invBusy === inv.id}
+                          onClick={() => enqueueInvoice(inv.id, false, inv.groupKey, inv.toNumber)}
+                        >
+                          {invBusy === inv.id ? '…' : 'Queue'}
+                        </button>
+                      )}
+                      {canDispatch && (
                         <button
                           className="btn-secondary text-xs !py-1 !px-2"
                           disabled={invBusy === inv.id}
@@ -205,8 +247,18 @@ export default function CustomerDetailPage() {
                         >
                           {invBusy === inv.id ? '…' : 'Call now'}
                         </button>
-                      </div>
-                    )}
+                      )}
+                      {canMarkPaid && (
+                        <button
+                          className="btn-ghost text-xs !py-1 !px-2 text-emerald-700 hover:bg-emerald-50"
+                          disabled={invBusy === inv.id}
+                          onClick={() => markPaid(inv.id, remaining)}
+                          title="Reconcile — record full payment and clear from Outstanding"
+                        >
+                          {invBusy === inv.id ? '…' : 'Mark paid'}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               );
@@ -271,6 +323,8 @@ export default function CustomerDetailPage() {
         )}
       </div>
 
+      <InvoiceDetailDrawer invoiceId={invoiceOpen} onClose={() => setInvoiceOpen(null)} />
+
       <Drawer open={editing} onClose={() => setEditing(false)} title="Edit customer" width="max-w-lg">
         {editing && (
           <EditForm
@@ -306,29 +360,140 @@ function TabList({ children, empty, emptyText }: { children: React.ReactNode; em
   );
 }
 
+// ── Details tab — the full customer record, grouped like the accounts master ──
+function Field({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+  const empty = value === null || value === undefined || value === '';
+  return (
+    <div>
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
+      <p className={`text-sm text-slate-800 mt-0.5 ${mono ? 'font-mono' : ''}`}>{empty ? <span className="text-slate-300">—</span> : value}</p>
+    </div>
+  );
+}
+
+function FlagBadge({ on }: { on: boolean }) {
+  return <Badge className={on ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}>{on ? 'Yes' : 'No'}</Badge>;
+}
+
+function InfoGroup({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <Card>
+      <CardBody>
+        <p className="text-[11px] font-bold uppercase tracking-widest text-slate-400 mb-4">{title}</p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-4">{children}</div>
+      </CardBody>
+    </Card>
+  );
+}
+
+function DetailsTab({ c }: { c: CustomerFields }) {
+  return (
+    <div className="space-y-4 max-w-4xl">
+      <InfoGroup title="Identity">
+        <Field label="Account #" value={c.accountCode} mono />
+        <Field label="Party name" value={c.businessName} />
+        <Field label="Status" value={<Badge className={c.isActive ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}>{c.isActive ? 'Active' : 'Inactive'}</Badge>} />
+        <Field label="Shop / location" value={c.locationName ? `${c.locationName}${c.locationCode ? ` (${c.locationCode})` : ''}` : c.locationCode} />
+        <Field label="Sales person" value={c.salesPersonName} />
+        <Field label="Hide invoice" value={<FlagBadge on={c.hideInvoice} />} />
+      </InfoGroup>
+
+      <InfoGroup title="Contact">
+        <Field label="Person name" value={c.contactPerson} />
+        <Field label="Contact #" value={c.contactPhone} mono />
+        <Field label="Email 1" value={c.email} />
+        <Field label="Email 2" value={c.email2} />
+        <Field label="ABN" value={c.abn} mono />
+      </InfoGroup>
+
+      <InfoGroup title="Address">
+        <Field label="Address line" value={c.addressLine} />
+        <Field label="City" value={c.city} />
+        <Field label="State" value={c.state} />
+        <Field label="Post code" value={c.postCode} mono />
+        <Field label="Delivery instructions" value={c.deliveryInstructions} />
+      </InfoGroup>
+
+      <InfoGroup title="Commercial">
+        <Field label="Terms" value={c.paymentTermsDays != null ? `${c.paymentTermsDays} days` : null} />
+        <Field label="Credit / outstanding limit" value={c.creditLimit != null ? fmtAmount('AUD', c.creditLimit) : null} />
+        <Field label="Balance amount" value={fmtAmount('AUD', c.balanceAmount)} />
+        <Field label="Outstanding" value={totalMoneyMagnitude(c.outstanding ?? []) > 0 ? fmtMoneyByCurrency(c.outstanding) : '—'} />
+        <Field label="Ignore min price" value={<FlagBadge on={c.ignoreMinPrice} />} />
+        <Field label="Ignore product min price" value={<FlagBadge on={c.ignoreProductMinPrice} />} />
+      </InfoGroup>
+    </div>
+  );
+}
+
 type EditPatch = {
-  businessName: string; contactPerson: string | null; contactPhone: string | null; email: string | null;
-  abn: string | null; addressLine: string | null; city: string | null; state: string | null;
-  postCode: string | null; deliveryInstructions: string | null;
+  businessName: string; accountCode: string | null; contactPerson: string | null; contactPhone: string | null;
+  email: string | null; email2: string | null; abn: string | null; addressLine: string | null; city: string | null;
+  state: string | null; postCode: string | null; deliveryInstructions: string | null;
+  paymentTermsDays: number | null; creditLimit: number | null;
+  ignoreMinPrice: boolean; ignoreProductMinPrice: boolean; hideInvoice: boolean; isActive: boolean;
+  salesPersonId: string | null; locationId: string | null;
 };
 
-function EditForm({ customer, saving, onCancel, onSave }: { customer: Detail['customer']; saving: boolean; onCancel: () => void; onSave: (p: EditPatch) => void }) {
+type RefOption = { id: string; label: string };
+
+function EditForm({ customer, saving, onCancel, onSave }: { customer: CustomerFields; saving: boolean; onCancel: () => void; onSave: (p: EditPatch) => void }) {
   const [s, setS] = useState({
-    businessName: customer.businessName ?? '', contactPerson: customer.contactPerson ?? '', contactPhone: customer.contactPhone ?? '',
-    email: customer.email ?? '', abn: customer.abn ?? '', addressLine: customer.addressLine ?? '', city: customer.city ?? '',
-    state: customer.state ?? '', postCode: customer.postCode ?? '', deliveryInstructions: customer.deliveryInstructions ?? '',
+    businessName: customer.businessName ?? '', accountCode: customer.accountCode ?? '',
+    contactPerson: customer.contactPerson ?? '', contactPhone: customer.contactPhone ?? '',
+    email: customer.email ?? '', email2: customer.email2 ?? '', abn: customer.abn ?? '',
+    addressLine: customer.addressLine ?? '', city: customer.city ?? '', state: customer.state ?? '', postCode: customer.postCode ?? '',
+    deliveryInstructions: customer.deliveryInstructions ?? '',
+    paymentTermsDays: customer.paymentTermsDays != null ? String(customer.paymentTermsDays) : '',
+    creditLimit: customer.creditLimit != null ? String(customer.creditLimit) : '',
+    salesPersonId: customer.salesPersonId ?? '', locationId: customer.locationId ?? '',
   });
-  const set = (k: keyof typeof s) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setS((v) => ({ ...v, [k]: e.target.value }));
+  const [flags, setFlags] = useState({
+    ignoreMinPrice: customer.ignoreMinPrice, ignoreProductMinPrice: customer.ignoreProductMinPrice,
+    hideInvoice: customer.hideInvoice, isActive: customer.isActive,
+  });
+  const [salesPeople, setSalesPeople] = useState<RefOption[]>([]);
+  const [locations, setLocations] = useState<RefOption[]>([]);
+
+  useEffect(() => {
+    fetch('/api/salespersons', { cache: 'no-store' }).then((r) => r.json()).then((d) => setSalesPeople((d.salesPersons ?? []).map((x: { id: string; name: string }) => ({ id: x.id, label: x.name })))).catch(() => {});
+    fetch('/api/locations', { cache: 'no-store' }).then((r) => r.json()).then((d) => setLocations((d.locations ?? []).map((x: { id: string; code: string; name: string }) => ({ id: x.id, label: `${x.name}${x.code ? ` (${x.code})` : ''}` })))).catch(() => {});
+  }, []);
+
+  const set = (k: keyof typeof s) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => setS((v) => ({ ...v, [k]: e.target.value }));
+  const toggle = (k: keyof typeof flags) => setFlags((v) => ({ ...v, [k]: !v[k] }));
+
   return (
     <div className="space-y-4">
-      <div><label className="label">Business name</label><input className="input" value={s.businessName} onChange={set('businessName')} /></div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="label">Account #</label><input className="input" value={s.accountCode} onChange={set('accountCode')} /></div>
+        <div><label className="label">Business name</label><input className="input" value={s.businessName} onChange={set('businessName')} /></div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="label">Sales person</label>
+          <select className="input" value={s.salesPersonId} onChange={set('salesPersonId')}>
+            <option value="">—</option>
+            {salesPeople.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+          </select>
+        </div>
+        <div><label className="label">Shop / location</label>
+          <select className="input" value={s.locationId} onChange={set('locationId')}>
+            <option value="">—</option>
+            {locations.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+          </select>
+        </div>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <div><label className="label">Contact person</label><input className="input" value={s.contactPerson} onChange={set('contactPerson')} /></div>
         <div><label className="label">Phone</label><input className="input" value={s.contactPhone} onChange={set('contactPhone')} /></div>
       </div>
       <div className="grid grid-cols-2 gap-3">
+        <div><label className="label">Email 1</label><input className="input" value={s.email} onChange={set('email')} /></div>
+        <div><label className="label">Email 2</label><input className="input" value={s.email2} onChange={set('email2')} /></div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
         <div><label className="label">ABN</label><input className="input" value={s.abn} onChange={set('abn')} /></div>
-        <div><label className="label">Email</label><input className="input" value={s.email} onChange={set('email')} /></div>
+        <div><label className="label">Terms (days)</label><input className="input" type="number" value={s.paymentTermsDays} onChange={set('paymentTermsDays')} /></div>
       </div>
       <div><label className="label">Delivery address</label><input className="input" value={s.addressLine} onChange={set('addressLine')} /></div>
       <div className="grid grid-cols-3 gap-3">
@@ -336,7 +501,21 @@ function EditForm({ customer, saving, onCancel, onSave }: { customer: Detail['cu
         <div><label className="label">State</label><input className="input" value={s.state} onChange={set('state')} /></div>
         <div><label className="label">Postcode</label><input className="input" value={s.postCode} onChange={set('postCode')} /></div>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div><label className="label">Credit / outstanding limit</label><input className="input" type="number" value={s.creditLimit} onChange={set('creditLimit')} /></div>
+      </div>
       <div><label className="label">Delivery instructions</label><textarea className="input min-h-[64px]" value={s.deliveryInstructions} onChange={set('deliveryInstructions')} /></div>
+      <div>
+        <label className="label">Flags</label>
+        <div className="flex flex-wrap gap-2">
+          {([['isActive', 'Active'], ['hideInvoice', 'Hide invoice'], ['ignoreMinPrice', 'Ignore min price'], ['ignoreProductMinPrice', 'Ignore product min price']] as [keyof typeof flags, string][]).map(([k, lbl]) => (
+            <button key={k} type="button" onClick={() => toggle(k)} aria-pressed={flags[k]}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${flags[k] ? 'bg-brand/10 border-brand/30 text-brand' : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'}`}>
+              {lbl}: {flags[k] ? 'Yes' : 'No'}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="flex justify-end gap-2 pt-2">
         <Button variant="secondary" onClick={onCancel} disabled={saving}>Cancel</Button>
         <Button
@@ -344,10 +523,16 @@ function EditForm({ customer, saving, onCancel, onSave }: { customer: Detail['cu
           loading={saving}
           disabled={s.businessName.trim().length === 0 || saving}
           onClick={() => onSave({
-            businessName: s.businessName,
-            contactPerson: s.contactPerson || null, contactPhone: s.contactPhone || null, email: s.email || null,
-            abn: s.abn || null, addressLine: s.addressLine || null, city: s.city || null, state: s.state || null,
-            postCode: s.postCode || null, deliveryInstructions: s.deliveryInstructions || null,
+            businessName: s.businessName, accountCode: s.accountCode || null,
+            contactPerson: s.contactPerson || null, contactPhone: s.contactPhone || null,
+            email: s.email || null, email2: s.email2 || null, abn: s.abn || null,
+            addressLine: s.addressLine || null, city: s.city || null, state: s.state || null, postCode: s.postCode || null,
+            deliveryInstructions: s.deliveryInstructions || null,
+            paymentTermsDays: s.paymentTermsDays.trim() === '' ? null : Number(s.paymentTermsDays),
+            creditLimit: s.creditLimit.trim() === '' ? null : Number(s.creditLimit),
+            ignoreMinPrice: flags.ignoreMinPrice, ignoreProductMinPrice: flags.ignoreProductMinPrice,
+            hideInvoice: flags.hideInvoice, isActive: flags.isActive,
+            salesPersonId: s.salesPersonId || null, locationId: s.locationId || null,
           })}
         >Save</Button>
       </div>

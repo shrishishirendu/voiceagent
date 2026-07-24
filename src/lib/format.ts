@@ -14,6 +14,16 @@ export function fmtBytes(n: number | null | undefined): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// Local-date day key (YYYY-MM-DD) from local date parts. Use this — NOT toISOString().slice(0,10),
+// which keys by UTC — whenever bucketing by day against a window built with local setHours(0,0,0,0),
+// or today's activity can fall into the wrong bucket in non-UTC timezones.
+export function localDay(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 export function fmtWhen(iso: string): string {
   const d = new Date(iso);
   const now = new Date();
@@ -24,11 +34,19 @@ export function fmtWhen(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+// Currencies that render with a bare "$" (our default). Anything else renders with an
+// explicit currency code prefix (e.g. "USD 4,459.88") so mixed-currency data stays legible.
+const DOLLAR_CURRENCIES = new Set(["", "AUD", "$", "A$", "AU$"]);
+
+export function isDollarCurrency(currency: string | null | undefined): boolean {
+  return DOLLAR_CURRENCIES.has((currency ?? "").trim().toUpperCase());
+}
+
 export function fmtAmount(currency: string | null | undefined, amount: number | null | undefined): string {
   if (amount == null) return "";
-  const n = amount.toLocaleString("en-AU", { maximumFractionDigits: 2 });
+  const n = amount.toLocaleString("en-AU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const c = (currency ?? "").trim().toUpperCase();
-  if (c === "" || c === "AUD" || c === "$" || c === "A$" || c === "AU$") return `$${n}`;
+  if (isDollarCurrency(c)) return `$${n}`;
   return `${c} ${n}`;
 }
 
@@ -66,6 +84,36 @@ export function fmtDate(dateStr: string | null | undefined): string {
     if (mi !== undefined) return `${parseInt(longDMY[1], 10)} ${months[mi]} ${longDMY[3]}`;
   }
   return s;
+}
+
+// Parse the same date shapes fmtDate understands (text dueDate column, mixed formats) into a
+// real Date for comparisons (e.g. past-due checks). Returns null when unrecognised. Day-only
+// precision — time is set to local midnight.
+export function parseDateFlexible(dateStr: string | null | undefined): Date | null {
+  if (!dateStr) return null;
+  const s = dateStr.trim();
+  const months: Record<string, number> = {
+    january: 0, february: 1, march: 2, april: 3, may: 4, june: 5, july: 6, august: 7, september: 8, october: 9, november: 10, december: 11,
+    jan: 0, feb: 1, mar: 2, apr: 3, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+  };
+  const mk = (y: number, mi: number, d: number) => (mi >= 0 && mi <= 11 && d >= 1 && d <= 31 ? new Date(y, mi, d) : null);
+
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (iso) return mk(+iso[1], +iso[2] - 1, +iso[3]);
+
+  const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (slash) {
+    const d1 = +slash[1], d2 = +slash[2], yr = +slash[3];
+    // Prefer AU (d/m/y); fall back to US (m/d/y) when the second field can't be a month.
+    return mk(yr, d2 - 1, d1) ?? mk(yr, d1 - 1, d2);
+  }
+  const mdy = /^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/.exec(s);
+  if (mdy && mdy[1].toLowerCase() in months) return mk(+mdy[3], months[mdy[1].toLowerCase()], +mdy[2]);
+
+  const dmy = /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/.exec(s);
+  if (dmy && dmy[2].toLowerCase() in months) return mk(+dmy[3], months[dmy[2].toLowerCase()], +dmy[1]);
+
+  return null;
 }
 
 export const PHONE_MIN_DIGITS = 9;

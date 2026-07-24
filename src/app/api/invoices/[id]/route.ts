@@ -2,7 +2,34 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { computeGroupKey, getSettings, normalisePhone, parseLineItemRows } from "@/lib/dispatcher";
-import { resolveAccess, hasRole, unauthorized, forbidden, trimInvoiceForAccess } from "@/lib/access";
+import { resolveAccess, hasRole, unauthorized, forbidden, trimInvoiceForAccess, trimCustomerForAccess } from "@/lib/access";
+
+export const dynamic = "force-dynamic";
+
+// Full invoice detail for the invoice drawer: the invoice + its line items + recorded
+// payments + the debtor's contact block. Owner-scoped (IDOR guard), with banking/PII
+// trimmed for viewer/agent roles before serialisation.
+export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+  const access = await resolveAccess();
+  if (!access) return unauthorized();
+
+  const inv = await prisma.invoice.findFirst({
+    where: { id: params.id, ownerId: access.ownerId },
+    include: {
+      lineItems: { orderBy: { createdAt: "asc" }, select: { id: true, description: true, quantity: true, unitPrice: true, lineTotal: true } },
+      payments: { orderBy: { createdAt: "desc" }, select: { id: true, payAmount: true, creditAmount: true, payDate: true, paymentType: true, createdAt: true } },
+      customer: { select: { id: true, businessName: true, contactPerson: true, contactPhone: true, email1: true, addressLine: true, city: true, state: true, postCode: true } },
+    },
+  });
+  if (!inv) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  const { customer, ...rest } = inv;
+  const invoice = trimInvoiceForAccess(rest as unknown as Record<string, unknown>, access);
+  const trimmedCustomer = customer
+    ? trimCustomerForAccess({ ...customer, email: customer.email1 } as unknown as Record<string, unknown>, access)
+    : null;
+  return NextResponse.json({ invoice, customer: trimmedCustomer });
+}
 
 const PatchSchema = z.object({
   contactBusiness: z.string().min(1).max(120).optional(),

@@ -172,6 +172,15 @@ export function IconArrowLeft({ className = 'w-4 h-4' }: IconProps) {
   );
 }
 
+export function IconLogout({ className = 'w-4 h-4' }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.75">
+      <path d="M8 4H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M13 13l3-3-3-3M16 10H8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 export function IconInfo({ className = 'w-4 h-4' }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">

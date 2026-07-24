@@ -9,7 +9,7 @@ import { PanelSkeleton } from '@/components/shared/Skeleton';
 import { WarningBadge } from '@/components/shared/Badge';
 import { useAddToast } from '@/components/shared/Toast';
 import { IconPlus, IconSearch, IconChevronRight } from '@/components/shared/Icons';
-import { fmtAmount } from '@/lib/format';
+import { fmtMoneyByCurrency, mergeMoney, totalMoneyMagnitude, type MoneyByCurrency } from '@/lib/money';
 
 interface CustomerSummary {
   id: string;
@@ -28,7 +28,7 @@ interface CustomerSummary {
   openInvoiceCount: number;
   ticketCount: number;
   callCount: number;
-  outstanding: number;
+  outstanding: MoneyByCurrency;
 }
 
 type FormState = {
@@ -142,7 +142,7 @@ export default function CustomersPage() {
     );
   }, [customers, query]);
 
-  const totalOutstanding = customers.reduce((s, c) => s + (c.outstanding || 0), 0);
+  const totalOutstanding = mergeMoney(customers.map((c) => c.outstanding ?? []));
 
   const saveNew = async (state: FormState) => {
     setSaving(true);
@@ -183,7 +183,7 @@ export default function CustomersPage() {
             <h1 className="font-display text-2xl font-semibold text-slate-900 tracking-tight">Customers</h1>
             <p className="mt-1 text-sm text-slate-500">
               {customers.length} customer{customers.length === 1 ? '' : 's'}
-              {totalOutstanding > 0 ? ` · ${fmtAmount('AUD', totalOutstanding)} outstanding` : ''}
+              {totalMoneyMagnitude(totalOutstanding) > 0 ? ` · ${fmtMoneyByCurrency(totalOutstanding)} outstanding` : ''}
             </p>
           </div>
           <Button variant="primary" icon={<IconPlus className="w-4 h-4" />} onClick={() => setAdding(true)}>
@@ -227,7 +227,7 @@ export default function CustomersPage() {
                     <div className="flex-none flex items-center gap-4">
                       <div className="text-right hidden sm:block">
                         <p className="text-xs text-slate-400">Outstanding</p>
-                        <p className="text-sm font-medium text-slate-800">{c.outstanding > 0 ? fmtAmount('AUD', c.outstanding) : '—'}</p>
+                        <p className="text-sm font-medium text-slate-800">{totalMoneyMagnitude(c.outstanding ?? []) > 0 ? fmtMoneyByCurrency(c.outstanding) : '—'}</p>
                       </div>
                       <div className="text-right hidden md:block w-20">
                         <p className="text-xs text-slate-400">Open / Tickets</p>

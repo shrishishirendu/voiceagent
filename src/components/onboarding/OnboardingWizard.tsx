@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { signOut } from 'next-auth/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/shared/Button';
 import { EnvoyLogo } from '@/components/shared/Logo';
@@ -27,7 +27,6 @@ const initial: State = {
 };
 
 export function OnboardingWizard() {
-  const router = useRouter();
   const [step, setStep] = useState(0);
   const [s, setS] = useState<State>(initial);
   const [submitting, setSubmitting] = useState(false);
@@ -61,7 +60,10 @@ export function OnboardingWizard() {
         }),
       });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'Onboarding failed');
-      router.push('/app/dashboard');
+      // Hard navigation (not router.push) so the /app layout gate re-evaluates on the server with
+      // the just-created Tenant row — a client-side push serves the cached "no tenant → /onboarding"
+      // result and bounces the user back to step 1.
+      window.location.assign('/app/dashboard');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Something went wrong');
       setSubmitting(false);
@@ -177,11 +179,16 @@ export function OnboardingWizard() {
           </AnimatePresence>
 
           <div className="flex justify-between items-center mt-8">
-            <Button variant="ghost" onClick={() => setStep((v) => Math.max(0, v - 1))} disabled={step === 0 || submitting}>Back</Button>
+            {step === 0 ? (
+              // No previous step to go back to — offer an exit that signs out to the login screen.
+              <Button variant="ghost" onClick={() => signOut({ callbackUrl: '/login' })} disabled={submitting}>Exit</Button>
+            ) : (
+              <Button variant="ghost" onClick={() => setStep((v) => Math.max(0, v - 1))} disabled={submitting}>Back</Button>
+            )}
             {step < STEPS.length - 1 ? (
               <Button variant="primary" onClick={() => setStep((v) => v + 1)} disabled={!canNext}>Continue</Button>
             ) : (
-              <Button variant="primary" onClick={finish} loading={submitting} disabled={!s.businessName.trim()}>Finish setup</Button>
+              <Button variant="primary" onClick={finish} loading={submitting} disabled={!s.businessName.trim()}>Finish &amp; go to dashboard</Button>
             )}
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/prisma'
+import { localDay } from '@/lib/format'
 
 // Server-side aggregation for the Outbound dashboard (mirrors EnvoyIn's server-computed
 // Analytics/Forecasting — derive once on the server, ship the finished numbers). All
@@ -15,10 +16,6 @@ export type OutboundStats = {
 
 const RESOLVED_OUTCOMES = ['success', 'partial']
 const ACTIVE_STATUSES = ['dispatching', 'ringing', 'in-progress']
-
-function isoDay(d: Date): string {
-  return d.toISOString().slice(0, 10)
-}
 
 export async function getOutboundStats(ownerId: string): Promise<OutboundStats> {
   const since = new Date()
@@ -60,10 +57,10 @@ export async function getOutboundStats(ownerId: string): Promise<OutboundStats> 
   for (let i = 0; i < 14; i++) {
     const d = new Date(since)
     d.setDate(since.getDate() + i)
-    perDay.set(isoDay(d), 0)
+    perDay.set(localDay(d), 0)
   }
   for (const c of recentCalls) {
-    const key = isoDay(new Date(c.createdAt))
+    const key = localDay(new Date(c.createdAt))
     if (perDay.has(key)) perDay.set(key, (perDay.get(key) ?? 0) + 1)
   }
   const callsPerDay = Array.from(perDay.entries()).map(([date, count]) => ({ date, count }))
