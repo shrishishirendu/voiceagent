@@ -10,7 +10,12 @@ import { IsoftLogo } from '@/components/shared/Logo';
 // pitch handoff; visual language + globe ported from the sibling EnvoyIn app. The single
 // "Launch app" CTA routes to /app/dashboard (middleware handles the auth/onboarding gate).
 
-const LAUNCH = '/app/dashboard';
+// Two distinct doors, deliberately. LOGIN is for people who already have an account
+// (owners, and employees who redeemed their invite); SIGNUP creates a new company. A
+// single "Launch app" CTA used to hide that distinction behind an auth redirect, which is
+// how employees ended up on a page that only offered to sign them up.
+const LOGIN = '/login';
+const SIGNUP = '/signup';
 
 // ── Scroll reveal ───────────────────────────────────────────────────────────
 function Reveal({ children, variant = 'up', delay = 0, className = '' }: { children: React.ReactNode; variant?: 'up' | 'left' | 'right' | 'scale' | 'blur'; delay?: number; className?: string }) {
@@ -84,7 +89,15 @@ function TopNav() {
           <a href="#demo" className="hover:text-brand transition-colors">See a call</a>
           <a href="#uses" className="hover:text-brand transition-colors">Use cases</a>
         </div>
-        <Link href={LAUNCH} className="landing-cta-sm">Launch app</Link>
+        <div className="flex items-center gap-4">
+          <Link
+            href={LOGIN}
+            className={`text-sm font-medium hover:text-brand transition-colors ${scrolled ? 'text-slate-600' : 'text-white/80'}`}
+          >
+            Log in
+          </Link>
+          <Link href={SIGNUP} className="landing-cta-sm">Get started</Link>
+        </div>
       </div>
     </nav>
   );
@@ -318,9 +331,13 @@ export function Landing() {
               An AI agent that places outbound phone calls on your behalf — chasing overdue invoices, confirming appointments and following up — then reports back exactly what happened.
             </p>
             <div className="hero-stagger flex flex-wrap items-center gap-3 mt-8" style={{ animationDelay: '0.4s' }}>
-              <Link href={LAUNCH} className="landing-cta">Launch Envoy <span aria-hidden>→</span></Link>
-              <a href="#how" className="landing-cta-ghost">See how it works</a>
+              <Link href={SIGNUP} className="landing-cta">Get started <span aria-hidden>→</span></Link>
+              <Link href={LOGIN} className="landing-cta-ghost">Log in</Link>
             </div>
+            <p className="hero-stagger text-xs text-white/45 mt-4" style={{ animationDelay: '0.45s' }}>
+              Setting up a company? Get started. Already on a team? Log in with the password you
+              set from your invite email.
+            </p>
             <div className="hero-stagger flex items-center gap-3 mt-10 text-white/60" style={{ animationDelay: '0.5s' }}>
               <span className="text-xs">Built &amp; operated in Australia by</span>
               <IsoftLogo className="h-5" white />
@@ -443,8 +460,8 @@ export function Landing() {
           <Reveal delay={140}><p className="text-lg text-[#F8EEF0]/70 mt-5 max-w-xl mx-auto">Let Envoy make the calls you keep putting off — and hand you the outcomes.</p></Reveal>
           <Reveal delay={200}>
             <div className="flex flex-wrap items-center justify-center gap-3 mt-9">
-              <Link href={LAUNCH} className="landing-cta">Launch Envoy <span aria-hidden>→</span></Link>
-              <a href="#how" className="landing-cta-ghost">See how it works</a>
+              <Link href={SIGNUP} className="landing-cta">Create your company account <span aria-hidden>→</span></Link>
+              <Link href={LOGIN} className="landing-cta-ghost">Log in</Link>
             </div>
           </Reveal>
         </div>

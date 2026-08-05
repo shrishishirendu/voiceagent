@@ -340,42 +340,35 @@ model Tenant {
   @@map("tenant")
 }
 
-// NextAuth adapter tables (JWT strategy — no Session table). `User.id` is the
-// lowercased email, forced by the Prisma auth adapter, so it doubles as `ownerId`
+// Auth identity (JWT sessions, email + password — no OAuth, so no Account table and
+// no Session table). `User.id` is the lowercased email, so it doubles as `ownerId`
 // everywhere — matching EnvoyIn's "owner_id = lowercased email" identity model.
+//
+// `passwordHash` is null between "invited" and "accepted the invite": an invited
+// employee has a User row so their identity exists, but cannot sign in until they set
+// a password via the emailed link.
+//
+// `isOwner` is what separates the two entry points. It is set ONLY by /api/signup
+// (someone deliberately creating a company). Without it, an email that belongs to no
+// tenant and no member list is refused rather than silently becoming the owner of a
+// brand-new empty workspace — see the new-owner rule in src/lib/access.ts.
 model User {
   id            String    @id // = lowercased email
   email         String    @unique
   name          String?
   image         String?
+  passwordHash  String?   @map("password_hash")
+  isOwner       Boolean   @default(false) @map("is_owner")
   emailVerified DateTime? @map("email_verified") @db.Timestamptz
-
-  accounts Account[]
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz
 
   @@map("users")
 }
 
-model Account {
-  id                String  @id @default(uuid()) @db.Uuid
-  userId            String  @map("user_id")
-  type              String
-  provider          String
-  providerAccountId String  @map("provider_account_id")
-  refresh_token     String? @db.Text
-  access_token      String? @db.Text
-  expires_at        Int?
-  token_type        String?
-  scope             String?
-  id_token          String? @db.Text
-  session_state     String?
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@unique([provider, providerAccountId])
-  @@index([userId])
-  @@map("accounts")
-}
-
+// Single-use, hashed, expiring tokens for the two out-of-band email flows.
+// `identifier` is "<purpose>:<lowercased email>" (purpose = invite | reset) and
+// `token` stores a SHA-256 hash of the value in the emailed link, never the value
+// itself — a leaked DB row therefore can't be replayed to take over an account.
 model VerificationToken {
   identifier String
   token      String

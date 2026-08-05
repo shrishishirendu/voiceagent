@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { EnvoyLogo, IsoftLogo } from '@/components/shared/Logo';
 import { IconGrid, IconUpload, IconCalendar, IconGear, IconChevronRight, IconUsers, IconWallet, IconTrend, IconPie, IconLogout } from '@/components/shared/Icons';
 import { SchedulerStatusPill } from './SchedulerStatusPill';
+import { canSeeNav, ROLE_LABELS, type Role } from '@/lib/permissions';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: IconGrid, href: '/app/dashboard' },
@@ -19,9 +20,24 @@ const NAV = [
   { id: 'settings', label: 'Settings', icon: IconGear, href: '/app/settings' },
 ];
 
-export function AppShellChrome({ children }: { children: React.ReactNode }) {
+// `role` is resolved server-side in app/app/layout.tsx and passed down, rather than
+// fetched here — the sidebar renders on the first paint, and a fetch would flash the full
+// nav to a viewer before trimming it.
+export function AppShellChrome({
+  children,
+  role,
+  email,
+}: {
+  children: React.ReactNode;
+  role: Role;
+  email: string;
+}) {
   const pathname = usePathname();
   const activeId = pathname?.split('/')[2] || 'dashboard';
+
+  // Hiding these is presentation only — each corresponding route/API enforces the same
+  // rule server-side, so typing the URL directly still gets a 403.
+  const nav = NAV.filter((item) => canSeeNav(role, item.id));
 
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => {
@@ -50,7 +66,7 @@ export function AppShellChrome({ children }: { children: React.ReactNode }) {
         </div>
 
         <nav className="flex flex-col gap-1.5 flex-1 min-h-0 overflow-y-auto -mr-1.5 pr-1.5">
-          {NAV.map(({ id, label, icon: Icon, href }) => (
+          {nav.map(({ id, label, icon: Icon, href }) => (
             <Link
               key={id}
               href={href}
@@ -68,8 +84,19 @@ export function AppShellChrome({ children }: { children: React.ReactNode }) {
         </nav>
 
         <div className={`flex-none mt-3 pt-3 border-t border-white/10 ${collapsed ? 'px-0' : 'px-2'}`}>
+          {/* Who am I and what can I do — the answer to "why can't I see Payments?" */}
+          {!collapsed && (
+            <div className="mb-3">
+              <p className="text-[13px] text-white/70 font-medium truncate" title={email}>
+                {email}
+              </p>
+              <p className="text-[11px] text-white/35 uppercase tracking-widest mt-0.5">
+                {ROLE_LABELS[role]}
+              </p>
+            </div>
+          )}
           <button
-            onClick={() => signOut({ callbackUrl: '/login' })}
+            onClick={() => signOut({ callbackUrl: '/login?notice=signed_out' })}
             title={collapsed ? 'Sign out' : undefined}
             className={`nav-btn flex items-center gap-3.5 w-full py-2.5 mb-3 rounded-xl text-sm font-medium text-white/50 hover:text-white/90 hover:bg-white/5 transition-all duration-100 ${
               collapsed ? 'px-0 justify-center' : 'px-3.5'
