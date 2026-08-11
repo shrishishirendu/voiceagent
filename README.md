@@ -62,6 +62,20 @@ npm run db:push
 
 ## 4. Seed demo data (optional but recommended)
 
+### Quickest path — one command, login included
+
+```bash
+npm run seed:demo-workspace          # add --with-pdfs to also upload invoice PDFs
+```
+
+Builds a complete workspace you can log straight into — **`dev@local.test` / `devpassword`**, owning *Golden Valley Produce Co.* — with 8 customers, 24 invoices, payments, calls across every outcome, and ~130 tickets spread over 42 days so the forecast and analytics charts have real curves.
+
+Unlike the scripts below, this one creates the `User` row too, so no separate password step is needed. It is idempotent (re-running rebuilds identical data), every write is scoped to that owner, it refuses to overwrite a workspace it did not create unless you pass `--force`, and it seeds `schedulerOn: false` so seeding can never start real calls. Override with `--email=`, `--password=`, `--business=`.
+
+`--with-pdfs` needs `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`; without them the generated PDFs are written to `./demo-invoices` instead of the bucket, and `/app/invoices/select` will show a config error.
+
+### Manual path — seed onto your own email
+
 Populates a tenant, customers, invoices, calls, and tickets so every screen renders with data. Pass your login email as the owner:
 
 ```bash
@@ -106,6 +120,7 @@ Open **http://localhost:3010**, click **Log in**, and sign in at `/login` with t
 | `npm run build` | `prisma generate` + `next build` |
 | `npm run start` | Serve the production build on :3010 |
 | `npm run db:push` | Apply Prisma schema to the database |
+| `npm run seed:demo-workspace` | Seed a complete loginable demo workspace from nothing (`dev@local.test` / `devpassword`) |
 | `npm run seed:demo` | Seed demo tenant/calls/tickets |
 | `npm run seed:crm` | Seed CRM reference data + detail |
 | `npm run lint` | Next.js lint |

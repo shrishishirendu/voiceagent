@@ -8,6 +8,7 @@
     "scheduler": "tsx scripts/scheduler.ts",
     "import:invoices": "tsx scripts/import-invoices.ts",
     "seed:demo": "tsx scripts/seed-demo.ts",
+    "seed:demo-workspace": "tsx scripts/seed-demo-workspace.ts",
     "seed:crm": "tsx scripts/seed-crm-details.ts",
     "build": "prisma generate && next build",
     "start": "next start -p 3010",

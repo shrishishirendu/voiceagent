@@ -132,6 +132,10 @@ Modified:
    - `AUTH_SECRET` = `wbfS7VbkCxf2dA4vrR5gqt/FHUpG0ZAJW6JbGualWSo=` (generated for this work)
    - `PUBLIC_BASE_URL` = `https://voiceagent-iota-silk.vercel.app`
    - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`
+   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_INVOICE_BUCKET` (= `invoices`) — added
+     2026-08-11. Without these `/api/files/*` 500s and `/app/invoices/select` renders a config error
+     instead of the invoice file list. The service-role key is server-side only; never expose it as a
+     `NEXT_PUBLIC_*` var.
    - Confirm `DATABASE_URL` / `DIRECT_URL` are present. **Delete `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`** — unused now.
    - Do **not** set `NEXTAUTH_URL`; v5 with `trustHost: true` ignores it.
 
