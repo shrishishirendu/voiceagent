@@ -1,16 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
-import { resolveAccess, hasRole, unauthorized, forbidden } from '@/lib/access'
+import { resolveAccess, unauthorized, requireCapability } from '@/lib/access'
+import { canRecordPayment, canViewPayments } from '@/lib/permissions'
 import { getPaymentsLedger, getPaymentSummary, recordPayment } from '@/lib/payments'
 
 export const dynamic = 'force-dynamic'
 
 // Unified payments ledger (Phase 3-F). GET returns the merged AR + inbound-ticket ledger
 // plus totals, optionally scoped to one customer (?customerId=). POST records a received
-// payment against an invoice (agent+).
+// payment against an invoice (admin+).
 export async function GET(req: NextRequest) {
   const access = await resolveAccess()
   if (!access) return unauthorized()
+  // Agents read the ledger — knowing whether an invoice has already been paid is exactly
+  // what stops them chasing a settled debt. Only admin+ may record one (see POST).
+  const denied = requireCapability(access, canViewPayments)
+  if (denied) return denied
   const customerId = req.nextUrl.searchParams.get('customerId') ?? undefined
   const [ledger, summary] = await Promise.all([
     getPaymentsLedger(access.ownerId, customerId),
@@ -30,7 +35,10 @@ const RecordSchema = z.object({
 export async function POST(req: NextRequest) {
   const access = await resolveAccess()
   if (!access) return unauthorized()
-  if (!hasRole(access, 'agent')) return forbidden()
+  // Recording a payment moves the ledger and can flip an invoice to resolved, so it sits
+  // with admin/owner rather than agent — agents can read the ledger but not write to it.
+  const denied = requireCapability(access, canRecordPayment)
+  if (denied) return denied
 
   let body: unknown
   try {

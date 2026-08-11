@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { prisma } from '@/lib/prisma'
-import { saveTenant } from '@/lib/tenant'
+import { saveTenant, hasTenant } from '@/lib/tenant'
 import { createCustomer } from '@/lib/customers'
-import { resolveAccess, unauthorized, bustAccessCache } from '@/lib/access'
+import { resolveAccess, unauthorized, forbidden, bustAccessCache } from '@/lib/access'
 
 // Completes onboarding for a brand-new owner: creates their Tenant config row (which is
 // what flips hasTenant() true and lets them into /app), seeds business-hours Settings,
@@ -32,6 +32,20 @@ const Schema = z.object({
 export async function POST(req: NextRequest) {
   const access = await resolveAccess()
   if (!access) return unauthorized()
+
+  // Onboarding is first-time company setup, so it must be BOTH owner-only and
+  // once-only. Without this, any member of an established workspace could POST here and
+  // overwrite their employer's business identity, hours and call defaults — access.ownerId
+  // resolves to the owner's tenant for members too, so the write would land on the real
+  // company row.
+  if (access.role !== 'owner') return forbidden('Only the account owner can set up the company')
+  if (await hasTenant(access.ownerId)) {
+    return NextResponse.json(
+      { error: 'This workspace is already set up. Change these details in Settings.' },
+      { status: 409 }
+    )
+  }
+
   const ownerId = access.ownerId
 
   let body: unknown

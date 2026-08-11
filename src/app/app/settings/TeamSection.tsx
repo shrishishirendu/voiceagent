@@ -65,10 +65,30 @@ export function TeamSection() {
       const data = await r.json();
       if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
       setInviteEmail('');
-      addToast('Member invited.', 'success');
+      // The member is on the roster either way; whether they can actually get IN depends
+      // on the email landing, so say which happened rather than a blanket success.
+      if (data.emailSent === false) {
+        addToast(data.warning ?? 'Member added, but the invite email failed to send.', 'error');
+      } else {
+        addToast(`Invite sent to ${inviteEmail.trim()}.`, 'success');
+      }
       await load();
     } catch (e) {
       addToast(e instanceof Error ? e.message : 'Invite failed.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resend = async (id: string, email: string) => {
+    setBusy(true);
+    try {
+      const r = await fetch(`/api/members/${id}/resend`, { method: 'POST' });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data?.error ?? `HTTP ${r.status}`);
+      addToast(`Invite re-sent to ${email}.`, 'success');
+    } catch (e) {
+      addToast(e instanceof Error ? e.message : 'Could not resend the invite.', 'error');
     } finally {
       setBusy(false);
     }
@@ -131,12 +151,34 @@ export function TeamSection() {
             {members.map((m) => (
               <div key={m.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 px-3.5 py-2.5">
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-slate-800 truncate">{m.email}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-slate-800 truncate">{m.email}</p>
+                    {!m.accepted_at && (
+                      <span className="pill bg-amber-50 text-amber-700 border-amber-200 flex-none text-[11px]">
+                        Pending
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-slate-500">
-                    {m.accepted_at ? 'Active' : 'Invited — pending first sign-in'} · {ROLE_HELP[m.role]}
+                    {m.accepted_at
+                      ? 'Password set — can sign in'
+                      : 'Invite emailed — waiting for them to set a password'}{' '}
+                    · {ROLE_HELP[m.role]}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 flex-none">
+                  {/* Only useful before acceptance; afterwards their route back in is
+                      "Forgot password", not a new invite. */}
+                  {!m.accepted_at && (
+                    <button
+                      onClick={() => resend(m.id, m.email)}
+                      disabled={busy}
+                      className="text-xs text-slate-500 hover:text-slate-900 underline underline-offset-2 disabled:opacity-50"
+                      title="Send the invite email again"
+                    >
+                      Resend
+                    </button>
+                  )}
                   <select
                     className="input py-1.5 text-sm w-28"
                     value={m.role}

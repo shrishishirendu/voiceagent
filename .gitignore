@@ -12,3 +12,6 @@ prisma/envoy-demo3.db*
 *.log
 tsconfig.tsbuildinfo
 .playwright-mcp/
+
+# Generated demo invoice PDFs (scripts/seed-demo-workspace.ts --with-pdfs)
+demo-invoices/

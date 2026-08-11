@@ -1,125 +1,138 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { signIn, getProviders } from 'next-auth/react';
+import { Suspense, useState } from 'react';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import { signIn } from 'next-auth/react';
 import { Button } from '@/components/shared/Button';
-import { EnvoyLogo } from '@/components/shared/Logo';
+import { AuthShell, AuthError } from '@/components/auth/AuthShell';
 
-export default function LoginPage() {
-  const router = useRouter();
+// Sign-in for people who ALREADY have an account — an owner who signed up, or an employee
+// who has redeemed their invite. It deliberately cannot create anything: creating a
+// company is /signup, and creating an employee account is the invite link. That
+// separation is the whole point (previously one page did all three implicitly).
+
+// Reasons another page may have bounced someone here, so the redirect isn't silent.
+const NOTICES: Record<string, string> = {
+  password_set: 'Password updated. Sign in with your new password.',
+  invite_accepted: 'Your account is ready. Sign in to continue.',
+  signed_out: 'You have been signed out.',
+};
+
+function LoginForm() {
+  const params = useSearchParams();
   const [email, setEmail] = useState('');
-  const [sent, setSent] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  // The dev-login provider only exists server-side when !VERCEL && ALLOW_DEV_LOGIN=1
-  // (see auth.config.ts). Reading the actual registered providers means this UI can never
-  // show up where it isn't really enabled — including the real hosted app.
-  const [devLoginAvailable, setDevLoginAvailable] = useState(false);
-  const [devEmail, setDevEmail] = useState('');
-  const [devSigningIn, setDevSigningIn] = useState(false);
-  useEffect(() => {
-    getProviders().then((p) => setDevLoginAvailable(!!p?.['dev-login'])).catch(() => {});
-  }, []);
+  const notice = NOTICES[params.get('notice') ?? ''] ?? null;
+  // Preserve where middleware was sending them before it bounced them to /login.
+  const callbackUrl = params.get('callbackUrl') || '/app/dashboard';
 
-  async function handleDevLogin(e: React.FormEvent) {
-    e.preventDefault();
-    if (!devEmail.trim()) return;
-    setDevSigningIn(true);
-    setError(null);
-    try {
-      const res = await signIn('dev-login', { email: devEmail.trim().toLowerCase(), callbackUrl: '/app', redirect: false });
-      if (res?.error) throw new Error('Could not sign in with that email.');
-      router.push('/app');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Dev sign-in failed.');
-      setDevSigningIn(false);
-    }
-  }
-
-  async function sendMagicLink(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    setSending(true);
+    setBusy(true);
     try {
-      const res = await signIn('email', { email: email.trim().toLowerCase(), redirect: false, callbackUrl: '/app' });
-      if (res?.error) setError('Could not send the sign-in link. Check the address and try again.');
-      else setSent(true);
+      const res = await signIn('password', {
+        email: email.trim().toLowerCase(),
+        password,
+        redirect: false,
+      });
+      // One message for every failure mode. The server can't tell us more without
+      // becoming an oracle for which addresses have accounts.
+      if (!res || res.error) {
+        setError('Incorrect email or password.');
+        setBusy(false);
+        return;
+      }
+      // Hard navigation, not router.push: the /app layout gate is a server component that
+      // reads the session, and the client router cache would otherwise serve the
+      // pre-login result.
+      window.location.assign(callbackUrl);
     } catch {
-      setError('Something went wrong sending the link.');
-    } finally {
-      setSending(false);
+      setError('Something went wrong signing in. Try again.');
+      setBusy(false);
     }
   }
 
   return (
-    <main className="app-bg min-h-screen flex items-center justify-center px-4">
-      <div className="card w-full max-w-sm p-8">
-        <div className="flex justify-center mb-6">
-          <EnvoyLogo />
-        </div>
-        <h1 className="text-lg font-semibold text-center mb-1">Sign in to Envoy</h1>
-        <p className="text-sm text-neutral-500 text-center mb-6">Outbound collections, on autopilot.</p>
+    <AuthShell
+      title="Log in to Envoy"
+      subtitle="Outbound collections, on autopilot."
+      footer={
+        <>
+          Setting up a new company?{' '}
+          <Link href="/signup" className="text-[var(--brand,#E31E24)] font-medium hover:underline">
+            Create a company account
+          </Link>
+        </>
+      }
+    >
+      {notice && (
+        <p className="text-sm text-center text-emerald-600 mb-4" role="status">
+          {notice}
+        </p>
+      )}
 
-        <Button variant="secondary" className="w-full justify-center mb-4" onClick={() => signIn('google', { callbackUrl: '/app' })}>
-          Continue with Google
+      <form onSubmit={submit} className="space-y-3">
+        <div>
+          <label className="label" htmlFor="email">
+            Work email
+          </label>
+          <input
+            id="email"
+            type="email"
+            required
+            autoComplete="username"
+            className="input"
+            placeholder="you@company.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </div>
+
+        <div>
+          <div className="flex items-baseline justify-between">
+            <label className="label" htmlFor="password">
+              Password
+            </label>
+            <Link href="/forgot-password" className="text-xs text-neutral-500 hover:underline">
+              Forgot password?
+            </Link>
+          </div>
+          <input
+            id="password"
+            type="password"
+            required
+            autoComplete="current-password"
+            className="input"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </div>
+
+        <AuthError>{error}</AuthError>
+
+        <Button type="submit" className="w-full justify-center" loading={busy}>
+          Log in
         </Button>
+      </form>
 
-        <div className="flex items-center gap-3 my-4">
-          <span className="h-px flex-1 bg-neutral-200 dark:bg-neutral-700" />
-          <span className="text-xs text-neutral-400">or</span>
-          <span className="h-px flex-1 bg-neutral-200 dark:bg-neutral-700" />
-        </div>
+      <p className="text-xs text-neutral-400 text-center mt-5">
+        Employees: use the &ldquo;Set your password&rdquo; link your administrator emailed you. You
+        don&rsquo;t need to create a company account.
+      </p>
+    </AuthShell>
+  );
+}
 
-        {sent ? (
-          <p className="text-sm text-center text-emerald-600">
-            Check <span className="font-medium">{email}</span> for a sign-in link.
-          </p>
-        ) : (
-          <form onSubmit={sendMagicLink} className="space-y-3">
-            <div>
-              <label className="label" htmlFor="email">Work email</label>
-              <input
-                id="email"
-                type="email"
-                required
-                className="input"
-                placeholder="you@company.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
-            </div>
-            {error && <p className="text-sm text-[var(--brand,#E31E24)]">{error}</p>}
-            <Button type="submit" className="w-full justify-center" loading={sending}>
-              Email me a sign-in link
-            </Button>
-          </form>
-        )}
-
-        {devLoginAvailable && (
-          <>
-            <div className="flex items-center gap-3 my-4">
-              <span className="h-px flex-1 bg-neutral-200" />
-              <span className="text-[10px] uppercase tracking-widest text-neutral-400">dev only</span>
-              <span className="h-px flex-1 bg-neutral-200" />
-            </div>
-            <form onSubmit={handleDevLogin} className="space-y-2">
-              <input
-                type="email"
-                required
-                className="input"
-                placeholder="dev@local.test"
-                value={devEmail}
-                onChange={(e) => setDevEmail(e.target.value)}
-              />
-              <Button type="submit" variant="secondary" className="w-full justify-center" loading={devSigningIn}>
-                Sign in as this email (dev)
-              </Button>
-            </form>
-          </>
-        )}
-      </div>
-    </main>
+export default function LoginPage() {
+  // useSearchParams needs a Suspense boundary for static prerendering.
+  return (
+    <Suspense>
+      <LoginForm />
+    </Suspense>
   );
 }

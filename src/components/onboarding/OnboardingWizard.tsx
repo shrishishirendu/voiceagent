@@ -26,9 +26,11 @@ const initial: State = {
   contacts: [],
 };
 
-export function OnboardingWizard() {
+// `initialBusinessName` carries the company name typed at signup so step 1 arrives
+// prefilled rather than asking for it a second time.
+export function OnboardingWizard({ initialBusinessName = '' }: { initialBusinessName?: string }) {
   const [step, setStep] = useState(0);
-  const [s, setS] = useState<State>(initial);
+  const [s, setS] = useState<State>({ ...initial, businessName: initialBusinessName });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
