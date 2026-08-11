@@ -235,6 +235,25 @@ async function wipeOwner(owner: string): Promise<void> {
   await prisma.location.deleteMany({ where: { ownerId: owner } })
 }
 
+/**
+ * Count rows in this workspace that this seeder did not create.
+ *
+ * The wipe above is scoped by ownerId, which is the right blast radius for a workspace the
+ * seeder owns outright — but a demo workspace can acquire real rows afterwards (e.g.
+ * scripts/migrate-owner.ts folding another owner's data in, or someone uploading an invoice
+ * through the UI). Those would be deleted silently on the next re-seed. Everything the
+ * seeder creates is recognisable — invoices are numbered `GV-…` and customers carry a known
+ * account code — so anything else is treated as foreign and makes the run stop.
+ */
+async function foreignRowCount(owner: string): Promise<{ invoices: number; customers: number }> {
+  const demoAccountCodes = CUSTOMERS.map((c) => c.accountCode)
+  const [invoices, customers] = await Promise.all([
+    prisma.invoice.count({ where: { ownerId: owner, NOT: { invoiceNumber: { startsWith: 'GV-' } } } }),
+    prisma.customer.count({ where: { ownerId: owner, NOT: { accountCode: { in: demoAccountCodes } } } }),
+  ])
+  return { invoices, customers }
+}
+
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -255,6 +274,21 @@ async function main() {
       console.error(
         `✖ ${owner} already owns a workspace ("${existing.businessName ?? '—'}") that was NOT created by this\n` +
           `  seeder. Refusing to wipe it. Use a different --email, or --force if you are certain.`
+      )
+      process.exit(1)
+    }
+  }
+
+  // Guard: never silently destroy rows that arrived from somewhere other than this seeder.
+  if (!args.force) {
+    const foreign = await foreignRowCount(owner)
+    if (foreign.invoices > 0 || foreign.customers > 0) {
+      console.error(
+        `✖ ${owner} holds rows this seeder did not create: ` +
+          `${foreign.invoices} invoice(s), ${foreign.customers} customer(s).\n` +
+          `  Re-seeding wipes the whole workspace by ownerId, which would delete them.\n` +
+          `  Move them to another owner first (scripts/migrate-owner.ts), or pass --force to\n` +
+          `  discard them deliberately.`
       )
       process.exit(1)
     }
