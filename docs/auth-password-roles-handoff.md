@@ -1,9 +1,10 @@
 # Auth rework: login/signup split + password auth + roles — handoff
 
-**Status:** feature-complete and passing tests, **not committed, not deployed.**
-**Branch:** `feature/auth-password-roles`, cut from `origin/main` @ `1f84718`. Every change below is
-uncommitted in the working tree.
+**Status:** feature-complete and passing tests, **committed and pushed, not deployed.**
+**Branch:** `feature/auth-password-roles`, cut from `origin/main` @ `1f84718`. Everything below was
+committed in `937cf85` on 2026-08-05.
 **Date paused:** 2026-08-05
+**Date committed:** 2026-08-05 (`937cf85`)
 
 ---
 
@@ -157,9 +158,10 @@ Modified:
    npx tsx scripts/set-owner-password.ts shreyank.sinha@isoftanz.com.au <password>
    ```
 
-6. **Docs + commit.** `README.md` and the `CLAUDE.md` changelog have not been updated. Nothing is
-   committed. `.env.example` **is** already rewritten (Google + `ALLOW_DEV_LOGIN` removed, Resend marked
-   required).
+6. ~~**Docs + commit.**~~ Done 2026-08-11: code committed as `937cf85`; `README.md` and the `CLAUDE.md`
+   changelog updated to match (Google/magic-link/`ALLOW_DEV_LOGIN` references removed, `set-owner-password.ts`
+   documented as the local-seeding login step). `.env.example` was already rewritten in the same commit
+   (Google + `ALLOW_DEV_LOGIN` removed, Resend marked required).
 
 7. Optional: add an npm script for the E2E suite — there isn't one.
 
