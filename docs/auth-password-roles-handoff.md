@@ -136,6 +136,24 @@ Modified:
      2026-08-11. Without these `/api/files/*` 500s and `/app/invoices/select` renders a config error
      instead of the invoice file list. The service-role key is server-side only; never expose it as a
      `NEXT_PUBLIC_*` var.
+   - **Outbound dispatch vars — added 2026-08-12.** These were never listed here, and without them
+     every dial-out fails at `resolveDispatchConfig` (`src/lib/credentials.ts`) with
+     `missing config: …` before Vapi is ever called:
+     - `VAPI_PRIVATE_KEY` — Vapi API key the dispatcher uses to create the outbound call.
+     - `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` — the Twilio account Vapi dials through.
+     - `TWILIO_PHONE_NUMBER` — the caller-id. Note a tenant's own `Tenant.phoneNumber`
+       (Settings → caller-id) **overrides** this env var, so a stale/fake value in the DB
+       silently shadows a correct env setting — blank it there to fall back to env.
+     - `ANTHROPIC_API_KEY` — the Claude model behind the Vapi assistant.
+     - `PUBLIC_URL` — the base URL Vapi posts its end-of-call webhook to. **Different from
+       `PUBLIC_BASE_URL` above**, which is only used for invite/reset email links; keep both.
+       If unset, `resolvePublicUrl()` now falls back to `https://$VERCEL_BRANCH_URL` (then
+       `$VERCEL_URL`), which Vercel injects automatically — so Preview works unconfigured, but
+       set it explicitly for Production so the webhook URL is stable across deploys.
+     - Caveat: with Vercel "Deployment Protection" enabled on Preview, Vapi's webhook POST is
+       401'd by the SSO gate. The call still dials and the Live screen still works (it polls
+       Vapi directly via `syncCallFromVapi`), but the invoice sits in `calling` until
+       `reapStaleCalls` sweeps it ~15 min later. Disable protection on Preview for real call tests.
    - Confirm `DATABASE_URL` / `DIRECT_URL` are present. **Delete `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`** — unused now.
    - Do **not** set `NEXTAUTH_URL`; v5 with `trustHost: true` ignores it.
 

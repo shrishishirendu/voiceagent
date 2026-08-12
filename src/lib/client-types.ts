@@ -59,6 +59,9 @@ export interface QueuedInvoice {
   attempts: number;
   chaseAfter: string;
   toNumber: string | null;
+  customerId: string | null;
+  /** The debtor Customer's master contactPhone — omitted for roles without PII access. */
+  customerPhone?: string | null;
   call: { id: string; status: string; outcome: string | null } | null;
   contactPerson: string | null;
   userName: string;

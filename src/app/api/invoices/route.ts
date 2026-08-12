@@ -142,6 +142,10 @@ export async function GET() {
     orderBy: { chaseAfter: "asc" as const },
     include: {
       lineItems: true,
+      // The debtor's master phone number — surfaced as `customerPhone` so the queue's edit
+      // drawer can pre-fill/compare against it without a second round-trip. Trimmed for
+      // roles that can't see customer PII (see trimInvoiceForAccess).
+      customer: { select: { contactPhone: true } },
       // Most recent linked call (call_invoice join) → the queue's "call" summary.
       callLinks: {
         include: { call: { select: { id: true, status: true, outcome: true, vapiCallId: true, createdAt: true } } },
@@ -156,9 +160,17 @@ export async function GET() {
   // Reshape each row back into the queue's expected JSON: flat scalar fields, the
   // line items re-serialised to a JSON string, and a single `call` summary object.
   const serialize = (inv: (typeof invoices)[number]) => {
-    const { lineItems, callLinks, ...rest } = inv;
-    // Trim banking/remittance fields for viewer/agent roles (Phase 3-C).
-    return trimInvoiceForAccess({ ...rest, lineItems: serializeLineItems(lineItems), call: callLinks[0]?.call ?? null }, access);
+    const { lineItems, callLinks, customer, ...rest } = inv;
+    // Trim banking/remittance + customer-contact fields for viewer/agent roles (Phase 3-C).
+    return trimInvoiceForAccess(
+      {
+        ...rest,
+        lineItems: serializeLineItems(lineItems),
+        customerPhone: customer?.contactPhone ?? null,
+        call: callLinks[0]?.call ?? null,
+      },
+      access
+    );
   };
 
   // Self-heal any non-terminal linked call directly from Vapi (mirrors the Live

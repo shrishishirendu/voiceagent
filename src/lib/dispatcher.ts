@@ -60,6 +60,23 @@ export function normalisePhone(raw: string): string {
   return "+" + n;
 }
 
+// Which number a dispatch actually dials.
+//
+// Precedence: a per-dispatch override typed by the user at dial time → the debtor
+// Customer's master `contactPhone` → whatever number the invoice itself was ingested
+// with. The customer record is the master number app-wide, so it deliberately beats a
+// stale number stored on an individual invoice. An override is request-scoped only —
+// callers must never persist it to Invoice.toNumber or Customer.contactPhone; the
+// permanent record of what was dialed is the Call.toNumber snapshot.
+export function resolveDialNumber(
+  override?: string | null,
+  customerPhone?: string | null,
+  invoicePhone?: string | null
+): string | null {
+  const picked = (override ?? "").trim() || (customerPhone ?? "").trim() || (invoicePhone ?? "").trim();
+  return picked ? normalisePhone(picked) : null;
+}
+
 // --- Customer resolution + line-item (de)serialisation --------------------
 
 type DbClient = Prisma.TransactionClient | typeof prisma;
@@ -405,7 +422,15 @@ export type DispatchResult =
 
 // All invoices in `invoices` must belong to `ownerId` (the caller — a per-tenant
 // scheduler tick or an owner-scoped API route — guarantees this).
-export async function dispatchInvoiceGroup(ownerId: string, invoices: Invoice[]): Promise<DispatchResult> {
+//
+// `opts.toNumberOverride` is a number typed by the user for THIS dispatch only (see
+// resolveDialNumber). It is never written back to the Invoice or the Customer — the
+// scheduler passes no opts and simply gains the customer-master fallback.
+export async function dispatchInvoiceGroup(
+  ownerId: string,
+  invoices: Invoice[],
+  opts: { toNumberOverride?: string | null } = {}
+): Promise<DispatchResult> {
   if (invoices.length === 0) return { ok: false, error: "empty group" };
 
   // Per-tenant outbound config (own Vapi/Twilio/Anthropic keys + caller-id), each
@@ -418,8 +443,16 @@ export async function dispatchInvoiceGroup(ownerId: string, invoices: Invoice[])
     (a.dueDate ?? "9999-12-31").localeCompare(b.dueDate ?? "9999-12-31")
   );
   const lead = sorted[0];
-  if (!lead.toNumber) return { ok: false, error: "no phone number on lead invoice" };
-  const toNumber = normalisePhone(lead.toNumber);
+
+  // Master number lives on the debtor Customer; the invoice's own number is the fallback.
+  const leadCustomer = lead.customerId
+    ? await prisma.customer.findFirst({
+        where: { id: lead.customerId, ownerId },
+        select: { contactPhone: true },
+      })
+    : null;
+  const toNumber = resolveDialNumber(opts.toNumberOverride, leadCustomer?.contactPhone, lead.toNumber);
+  if (!toNumber) return { ok: false, error: "no phone number on lead invoice" };
 
   const voice = lead.voice as VoiceId;
   const manner = lead.manner as Manner;

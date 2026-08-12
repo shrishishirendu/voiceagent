@@ -326,7 +326,12 @@ async function main() {
     create: {
       ownerId: owner,
       businessName: args.business,
-      phoneNumber: '+61255500100',
+      // Deliberately null: Tenant.phoneNumber is the caller-id and it WINS over the
+      // TWILIO_PHONE_NUMBER env var (see lib/credentials.ts resolveDispatchConfig). A
+      // hardcoded placeholder here silently shadows a correctly-configured real Twilio
+      // number and makes every dial-out fail. Leave it unset so env is used; set a real
+      // owned number via Settings → caller-id if a tenant needs its own.
+      phoneNumber: null,
       data: {
         demoSeed: true,
         onboarded: true,

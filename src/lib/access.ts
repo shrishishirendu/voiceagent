@@ -144,6 +144,9 @@ export function unauthorized() {
 const BANKING_KEYS = ['bankName', 'bsb', 'accountNumber', 'swiftCode', 'remittanceName', 'remittanceContact'] as const
 // Customer contact PII + commercial-sensitivity fields.
 const CUSTOMER_PII_KEYS = ['contactPhone', 'email', 'email1', 'email2', 'abn', 'creditLimit'] as const
+// Customer contact fields that ride along on an invoice DTO (the queue list denormalises the
+// debtor's master number as `customerPhone`) — same sensitivity as the customer's own PII.
+const INVOICE_CUSTOMER_PII_KEYS = ['customerPhone'] as const
 
 export function canSeeSensitive(access: Access | null): boolean {
   return canSeeSensitiveFields(access?.role)
@@ -162,7 +165,7 @@ export function trimCustomerForAccess<T extends Record<string, unknown>>(custome
 
 export function trimInvoiceForAccess<T extends Record<string, unknown>>(invoice: T, access: Access | null): T {
   if (canSeeSensitive(access)) return invoice
-  return stripKeys(invoice, BANKING_KEYS)
+  return stripKeys(invoice, [...BANKING_KEYS, ...INVOICE_CUSTOMER_PII_KEYS])
 }
 
 // A Call row carries the same banking snapshot fields as an Invoice.

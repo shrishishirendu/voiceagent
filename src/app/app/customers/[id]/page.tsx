@@ -6,12 +6,13 @@ import { useParams } from 'next/navigation';
 import { Card, CardBody } from '@/components/shared/Card';
 import { Button } from '@/components/shared/Button';
 import { Drawer } from '@/components/shared/Drawer';
+import { Modal } from '@/components/shared/Modal';
 import { InvoiceDetailDrawer } from '@/components/shared/InvoiceDetailDrawer';
 import { Badge, Pill } from '@/components/shared/Badge';
 import { PanelSkeleton } from '@/components/shared/Skeleton';
 import { useAddToast } from '@/components/shared/Toast';
 import { IconArrowLeft, IconEdit } from '@/components/shared/Icons';
-import { fmtAmount, fmtDate, fmtWhen } from '@/lib/format';
+import { fmtAmount, fmtDate, fmtWhen, hasCallableNumber } from '@/lib/format';
 import { fmtMoneyByCurrency, totalMoneyMagnitude, type MoneyByCurrency } from '@/lib/money';
 
 type CustomerFields = {
@@ -89,35 +90,68 @@ export default function CustomerDetailPage() {
   useEffect(() => { load(); }, [load]);
 
   const [invBusy, setInvBusy] = useState<string | null>(null);
+  // Inline "we need a number before we can dial" prompt — replaces the old dead-end toast
+  // that told the user to edit the invoice on a tab that has no edit control.
+  const [phonePrompt, setPhonePrompt] = useState<{ invId: string; dispatchNow: boolean } | null>(null);
+  const [promptNumber, setPromptNumber] = useState('+61 ');
+  const [promptSaveDefault, setPromptSaveDefault] = useState(true);
 
-  const enqueueInvoice = useCallback(async (invId: string, dispatchNow: boolean, groupKey: string, toNumber: string | null) => {
-    if (!toNumber) { addToast('This invoice has no phone number — add one via Edit first.', 'error'); return; }
+  // `override`, when set, is dialed for THIS call only — it is never written to the invoice.
+  // It only becomes permanent if the user asked to save it as the customer's default.
+  const runEnqueue = useCallback(async (invId: string, dispatchNow: boolean, override: string | null, saveAsDefault: boolean) => {
     setInvBusy(invId);
     try {
+      if (saveAsDefault && override && id) {
+        const cr = await fetch(`/api/customers/${id}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contactPhone: override }),
+        });
+        if (!cr.ok) {
+          const b = await cr.json().catch(() => ({}));
+          throw new Error(b.error || 'Could not save the default number.');
+        }
+      }
       const patch = await fetch(`/api/invoices/${invId}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'pending', chaseAfter: new Date().toISOString() }),
       });
-      if (!patch.ok) throw new Error('enqueue failed');
+      if (!patch.ok) {
+        const b = await patch.json().catch(() => ({}));
+        throw new Error(b.error || `Could not queue this invoice (HTTP ${patch.status}).`);
+      }
       if (dispatchNow) {
         const r = await fetch('/api/invoices/dispatch', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ groupKey }),
+          body: JSON.stringify({ invoiceId: invId, ...(override ? { toNumber: override } : {}) }),
         });
         const j = await r.json().catch(() => ({}));
-        if (r.ok && j.dispatched > 0) addToast('Call dispatched.', 'success');
-        else addToast(j.reason || j.errors?.[0] || 'Queued — will dial in business hours.', 'info');
+        if (!r.ok) throw new Error(j.error || `Dispatch failed (HTTP ${r.status}).`);
+        if (j.errors?.length) throw new Error(j.errors[0]);
+        if (j.dispatched > 0) addToast('Call dispatched.', 'success');
+        else addToast(j.reason || 'Queued — will dial in business hours.', 'info');
       } else {
         addToast('Invoice queued for chasing.', 'success');
       }
       await load();
     } catch (e) {
       console.error(e);
-      addToast('Action failed.', 'error');
+      addToast(e instanceof Error ? e.message : 'Action failed.', 'error');
     } finally {
       setInvBusy(null);
     }
-  }, [addToast, load]);
+  }, [addToast, load, id]);
+
+  const enqueueInvoice = useCallback((invId: string, dispatchNow: boolean, toNumber: string | null) => {
+    // The customer's master number is the primary; the invoice's own is the fallback. Only
+    // when neither exists do we have to ask (the dispatcher applies the same precedence).
+    if (!(data?.customer.contactPhone || toNumber)) {
+      setPromptNumber('+61 ');
+      setPromptSaveDefault(true);
+      setPhonePrompt({ invId, dispatchNow });
+      return;
+    }
+    runEnqueue(invId, dispatchNow, null, false);
+  }, [data, runEnqueue]);
 
   // Reconcile — mark an invoice as paid. Records a payment for the remaining balance, which
   // advances paidAmount and flips the invoice to resolved (so it drops out of Outstanding).
@@ -234,7 +268,7 @@ export default function CustomerDetailPage() {
                         <button
                           className="btn-ghost text-xs !py-1 !px-2"
                           disabled={invBusy === inv.id}
-                          onClick={() => enqueueInvoice(inv.id, false, inv.groupKey, inv.toNumber)}
+                          onClick={() => enqueueInvoice(inv.id, false, inv.toNumber)}
                         >
                           {invBusy === inv.id ? '…' : 'Queue'}
                         </button>
@@ -243,7 +277,7 @@ export default function CustomerDetailPage() {
                         <button
                           className="btn-secondary text-xs !py-1 !px-2"
                           disabled={invBusy === inv.id}
-                          onClick={() => enqueueInvoice(inv.id, true, inv.groupKey, inv.toNumber)}
+                          onClick={() => enqueueInvoice(inv.id, true, inv.toNumber)}
                         >
                           {invBusy === inv.id ? '…' : 'Call now'}
                         </button>
@@ -322,6 +356,67 @@ export default function CustomerDetailPage() {
           )
         )}
       </div>
+
+      <Modal
+        open={!!phonePrompt}
+        onClose={() => setPhonePrompt(null)}
+        title={phonePrompt?.dispatchNow ? 'Number to call' : 'Number to chase on'}
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-slate-500 leading-relaxed">
+            Neither this invoice nor {c.businessName} has a phone number on file. Enter one to continue.
+          </p>
+          <div>
+            <label className="label">Number</label>
+            <input
+              type="tel"
+              className="input font-mono"
+              value={promptNumber}
+              onChange={(e) => setPromptNumber(e.target.value)}
+              placeholder="+61 4..."
+              autoFocus
+            />
+          </div>
+          {phonePrompt?.dispatchNow ? (
+            <label className="flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                className="mt-0.5 accent-brand"
+                checked={promptSaveDefault}
+                onChange={(e) => setPromptSaveDefault(e.target.checked)}
+              />
+              <span>
+                Also save as {c.businessName}&rsquo;s default number
+                <span className="block text-slate-400">
+                  Leave unticked to use it for this call only — nothing is written to the invoice either way.
+                </span>
+              </span>
+            </label>
+          ) : (
+            // Queue-only: there's no call to scope the number to, so it has to be saved
+            // somewhere or the invoice would sit in the queue undialable.
+            <p className="text-xs text-slate-400 leading-relaxed">
+              This will be saved as {c.businessName}&rsquo;s default number so the scheduler can reach them.
+              The invoice itself is not modified.
+            </p>
+          )}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="secondary" onClick={() => setPhonePrompt(null)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={!hasCallableNumber(promptNumber)}
+              onClick={() => {
+                if (!phonePrompt) return;
+                const { invId, dispatchNow } = phonePrompt;
+                setPhonePrompt(null);
+                runEnqueue(invId, dispatchNow, promptNumber.trim(), dispatchNow ? promptSaveDefault : true);
+              }}
+            >
+              {phonePrompt?.dispatchNow ? 'Call now' : 'Queue'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <InvoiceDetailDrawer invoiceId={invoiceOpen} onClose={() => setInvoiceOpen(null)} />
 
