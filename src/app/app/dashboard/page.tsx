@@ -108,12 +108,12 @@ const METRIC_STYLES: Record<'total' | 'queued' | 'attention' | 'resolved', Metri
 // ── Live activity rail (recent calls, newest first) ─────────────────────────
 function LiveActivity({ calls, onOpen }: { calls: Call[]; onOpen: (id: string) => void }) {
   return (
-    <div className="flex flex-col min-h-0 rounded-2xl border border-slate-100 shadow-sm overflow-hidden bg-white">
+    <div className="flex flex-col min-h-0 max-h-[700px] rounded-2xl border border-slate-100 shadow-sm overflow-hidden bg-white">
       <div className="flex-none px-4 py-3.5 flex items-center gap-2 gradient-shine" style={{ background: 'linear-gradient(135deg, #ff5c5c 0%, #E31E24 40%, #99101a 100%)' }}>
         <span className="w-2 h-2 rounded-full bg-white animate-pulse flex-none" />
         <span className="text-sm font-bold text-white tracking-tight">Live Activity</span>
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide divide-y divide-slate-50 max-h-[560px]">
+      <div className="flex-1 min-h-0 overflow-y-auto scrollbar-hide divide-y divide-slate-50">
         {calls.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-14 px-4">
             <span className="text-xs text-slate-300 font-medium">No activity yet</span>
@@ -382,16 +382,18 @@ function DashboardPageInner() {
                 </Card>
               </div>
 
-              <div>
+              <div className="xl:min-h-screen">
                 <h2 className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3">Live board</h2>
-                {filteredTickets.length === 0 ? (
-                  <div className="text-center py-16 rounded-2xl border border-dashed border-slate-200">
-                    <p className="font-display text-base italic text-slate-400">{tickets.length === 0 ? 'No outbound tickets yet.' : 'No tickets match your filters.'}</p>
-                    <p className="text-xs text-slate-400 mt-1">Dispatch a call from the Queue or an invoice to create one.</p>
-                  </div>
-                ) : (
-                  <TicketBoard tickets={filteredTickets} onOpen={setOpenTicketId} />
-                )}
+                <div className="xl:sticky xl:top-2">
+                  {filteredTickets.length === 0 ? (
+                    <div className="text-center py-16 rounded-2xl border border-dashed border-slate-200">
+                      <p className="font-display text-base italic text-slate-400">{tickets.length === 0 ? 'No outbound tickets yet.' : 'No tickets match your filters.'}</p>
+                      <p className="text-xs text-slate-400 mt-1">Dispatch a call from the Queue or an invoice to create one.</p>
+                    </div>
+                  ) : (
+                    <TicketBoard tickets={filteredTickets} onOpen={setOpenTicketId} />
+                  )}
+                </div>
               </div>
             </div>
 
