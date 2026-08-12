@@ -90,11 +90,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   const newBusiness = d.contactBusiness ?? existing.contactBusiness;
   const groupKey = computeGroupKey(newAbn ?? undefined, newBusiness);
 
-  // Re-derive chaseAfter if dueDate changed, or use explicit override (e.g. manual retry).
+  // Re-derive chaseAfter if dueDate ACTUALLY changed, or use an explicit override (e.g. manual
+  // retry). The value-equality check matters: the edit drawer PATCHes the whole form back, so
+  // dueDate is always present in the body even when the user only touched an unrelated field.
+  // Recomputing unconditionally pushed chaseAfter back out to the (often future) due date and
+  // silently made the invoice ineligible for the scheduler's `chaseAfter <= now` gate.
   let chaseAfter = existing.chaseAfter;
   if (d.chaseAfter !== undefined) {
     chaseAfter = new Date(d.chaseAfter);
-  } else if (d.dueDate !== undefined) {
+  } else if (d.dueDate !== undefined && d.dueDate !== existing.dueDate) {
     const settings = await getSettings(access.ownerId);
     chaseAfter = computeChaseAfter(d.dueDate, settings.dueOffsetDays);
   }

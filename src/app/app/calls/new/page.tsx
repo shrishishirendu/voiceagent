@@ -37,7 +37,18 @@ export default function NewCallPage() {
   const [error, setError] = useState<string | null>(null);
 
   const phoneDigits = phoneDigitCount(number);
-  const isValid = phoneDigits >= 9 && objective.trim().length > 9 && !submitting;
+  const needsPhone = phoneDigits < 9;
+  const needsObjective = objective.trim().length <= 9;
+  const isValid = !needsPhone && !needsObjective && !submitting;
+
+  // Say WHY the button is disabled rather than leaving it inertly greyed out.
+  const blockedReason = needsPhone
+    ? needsObjective
+      ? 'Enter a full phone number and an objective of at least 10 characters.'
+      : 'Enter a full phone number (at least 9 digits).'
+    : needsObjective
+      ? 'Add a bit more detail to the objective — at least 10 characters.'
+      : null;
 
   const submit = async () => {
     if (!isValid) return;
@@ -56,7 +67,9 @@ export default function NewCallPage() {
           userName: userName || 'the caller',
         }),
       });
-      const data = await res.json();
+      // Parse defensively: a non-JSON body (e.g. an SSO/Deployment-Protection HTML page)
+      // would otherwise throw a confusing "Unexpected token '<'" instead of the real status.
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
       router.push(`/app/calls/live/${data.id}`);
     } catch (e) {
@@ -181,13 +194,18 @@ export default function NewCallPage() {
           </CardBody>
         </Card>
 
-        <div className="mt-6 flex items-center justify-between gap-6">
+        <div className="mt-6 flex items-start justify-between gap-6">
           <p className="text-xs text-slate-400 max-w-xs leading-relaxed">
             The call is recorded. Envoy identifies itself as an AI agent.
           </p>
-          <Button variant="primary" disabled={!isValid} loading={submitting} onClick={submit} className="px-8 py-3 rounded-full shrink-0">
-            {submitting ? 'Dispatching…' : 'Dispatch Envoy'}
-          </Button>
+          <div className="shrink-0 flex flex-col items-end gap-2">
+            <Button variant="primary" disabled={!isValid} loading={submitting} onClick={submit} className="px-8 py-3 rounded-full">
+              {submitting ? 'Dispatching…' : 'Dispatch Envoy'}
+            </Button>
+            {blockedReason && !submitting && (
+              <p className="text-xs text-slate-400 text-right max-w-[16rem] leading-relaxed">{blockedReason}</p>
+            )}
+          </div>
         </div>
       </div>
     </div>

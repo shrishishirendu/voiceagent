@@ -20,7 +20,11 @@ import { Spinner } from '@/components/shared/Spinner';
 import { useAddToast } from '@/components/shared/Toast';
 import { IconRefresh, IconEdit, IconTrash } from '@/components/shared/Icons';
 import { CallDetailDrawer } from '@/components/shared/CallDetailDrawer';
-import { InvoiceComposeForm } from '@/components/shared/InvoiceComposeForm';
+import { InvoiceComposeForm, type InvoiceComposeSubmitOpts } from '@/components/shared/InvoiceComposeForm';
+
+// An invoice is dialable if EITHER its customer has a master number or the invoice itself
+// carries one — same precedence the dispatcher applies (resolveDialNumber).
+const isDialable = (inv: QueuedInvoice) => !!(inv.customerPhone || inv.toNumber);
 
 interface DebtorGroup {
   key: string;
@@ -29,11 +33,13 @@ interface DebtorGroup {
 }
 
 // Convert a QueuedInvoice (queue row shape) to the InvoiceParseResult shape InvoiceComposeForm expects.
+// The customer's master number wins over whatever number the invoice was ingested with — the
+// Customer record is the single source of truth for how a debtor is reached.
 function queueInvoiceToParseResult(inv: QueuedInvoice): InvoiceParseResult {
   return {
     contactBusiness: inv.contactBusiness,
     contactPerson: inv.contactPerson ?? null,
-    toNumber: inv.toNumber ?? null,
+    toNumber: inv.customerPhone ?? inv.toNumber ?? null,
     invoiceNumber: inv.invoiceNumber ?? null,
     invoiceDate: inv.invoiceDate ?? null,
     dueDate: inv.dueDate ?? null,
@@ -52,11 +58,13 @@ function queueInvoiceToParseResult(inv: QueuedInvoice): InvoiceParseResult {
 }
 
 // Mirrors demo2.0's handleQueueSave/handleQueueDispatch payload shape for PATCH /api/invoices/[id].
+// NOTE: `toNumber` is deliberately absent. The number in the form is the number to dial for this
+// dispatch only — it travels in the dispatch POST body, never into the stored invoice. Persisting
+// it is an explicit, separate act ("save as this customer's default" → PATCH /api/customers/[id]).
 function buildInvoicePatchPayload(state: BulkFormState) {
   return {
     contactBusiness: state.contactBusiness || null,
     contactPerson: state.contactPerson || null,
-    toNumber: state.toNumber || null,
     abn: state.abn || null,
     invoiceNumber: state.invoiceNumber || null,
     invoiceDate: state.invoiceDate || null,
@@ -144,9 +152,12 @@ export default function QueuePage() {
     setRunning(true);
     try {
       const res = await fetch('/api/scheduler/tick?force=1', { method: 'POST' });
-      const data = await res.json();
-      if (data.errors?.length) addToast(data.errors[0], 'error');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) addToast(data.error || `Run failed (HTTP ${res.status}).`, 'error');
+      else if (data.errors?.length) addToast(data.errors[0], 'error');
       else if (data.dispatched > 0) addToast(`Dispatched ${data.dispatched} call${data.dispatched === 1 ? '' : 's'}.`, 'success');
+      else if (data.reason === 'scheduler off')
+        addToast('Scheduler is off — turn it on in Settings, or dispatch a debtor group directly.', 'info');
       else addToast(data.reason ? `No calls dispatched — ${data.reason}.` : 'No calls dispatched.', 'info');
       startPolling();
     } catch {
@@ -164,9 +175,12 @@ export default function QueuePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ groupKey }),
       });
-      const data = await res.json();
-      if (data.errors?.length) addToast(data.errors[0], 'error');
-      else if (data.reason) addToast(data.reason, 'info');
+      // A 401/403/500 carries no `errors`/`reason`, so without this check the old code fell
+      // through to a green "Call dispatched." toast while nothing had happened.
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) addToast(data.error || `Dispatch failed (HTTP ${res.status}).`, 'error');
+      else if (data.errors?.length) addToast(data.errors[0], 'error');
+      else if (!data.dispatched) addToast(data.reason || 'No call was dispatched.', 'info');
       else addToast('Call dispatched.', 'success');
       startPolling();
     } catch {
@@ -212,7 +226,21 @@ export default function QueuePage() {
 
   const closeEdit = () => setEditingInvoice(null);
 
-  const handleQueueSave = async (state: BulkFormState) => {
+  // Persist the typed number as the customer's master number. Only ever called when the user
+  // explicitly ticked "save as default" — an ordinary dispatch never writes a phone number.
+  const saveCustomerDefaultNumber = async (customerId: string, phone: string) => {
+    const res = await fetch(`/api/customers/${customerId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactPhone: phone }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || 'Could not save the customer default number.');
+    }
+  };
+
+  const handleQueueSave = async (state: BulkFormState, opts?: InvoiceComposeSubmitOpts) => {
     if (!editingInvoice) return;
     setEditSaving(true);
     try {
@@ -221,20 +249,26 @@ export default function QueuePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildInvoicePatchPayload(state)),
       });
-      if (!res.ok) throw new Error('save failed');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Failed to save invoice (HTTP ${res.status}).`);
+      }
+      if (opts?.saveAsDefault && editingInvoice.customerId && state.toNumber.trim()) {
+        await saveCustomerDefaultNumber(editingInvoice.customerId, state.toNumber.trim());
+      }
       addToast('Invoice updated.', 'success');
       closeEdit();
       await load();
-    } catch (e) {
-      console.error(e);
-      addToast('Failed to save invoice.', 'error');
     } finally {
       setEditSaving(false);
     }
   };
 
-  // Save edits then immediately dispatch this debtor's group (bypasses business-hours gate).
-  const handleQueueDispatch = async (state: BulkFormState) => {
+  // Save edits then immediately dispatch this invoice (bypasses the business-hours gate and,
+  // because the click IS the schedule, the chaseAfter gate too). Errors are re-thrown so the
+  // form's inline banner shows the real reason and the drawer stays open — the old code
+  // swallowed non-ok responses and closed the drawer on a green "dispatched" toast.
+  const handleQueueDispatch = async (state: BulkFormState, opts?: InvoiceComposeSubmitOpts) => {
     if (!editingInvoice) return;
     setEditSaving(true);
     try {
@@ -243,24 +277,32 @@ export default function QueuePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(buildInvoicePatchPayload(state)),
       });
-      if (!patchRes.ok) throw new Error('save failed');
-      // The PATCH may re-derive groupKey (business name/ABN changed) — dispatch the fresh one.
-      const updated = await patchRes.json();
+      if (!patchRes.ok) {
+        const body = await patchRes.json().catch(() => ({}));
+        throw new Error(body.error || `Failed to save invoice (HTTP ${patchRes.status}).`);
+      }
+      if (opts?.saveAsDefault && editingInvoice.customerId && state.toNumber.trim()) {
+        await saveCustomerDefaultNumber(editingInvoice.customerId, state.toNumber.trim());
+      }
+
       const dispatchRes = await fetch('/api/invoices/dispatch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ groupKey: updated.groupKey ?? editingInvoice.groupKey }),
+        body: JSON.stringify({
+          invoiceId: editingInvoice.id,
+          // Request-scoped: dialed for this call only, never written back to the invoice.
+          ...(state.toNumber.trim() ? { toNumber: state.toNumber.trim() } : {}),
+        }),
       });
-      const data = await dispatchRes.json();
-      if (data.errors?.length) addToast(data.errors[0], 'error');
-      else if (data.reason) addToast(data.reason, 'info');
-      else addToast('Call dispatched.', 'success');
+      const data = await dispatchRes.json().catch(() => ({}));
+      if (!dispatchRes.ok) throw new Error(data.error || `Dispatch failed (HTTP ${dispatchRes.status}).`);
+      if (data.errors?.length) throw new Error(data.errors[0]);
+      if (!data.dispatched) throw new Error(data.reason || 'No call was dispatched.');
+
+      addToast('Call dispatched.', 'success');
       closeEdit();
       startPolling();
       await load();
-    } catch (e) {
-      console.error(e);
-      addToast('Dispatch failed.', 'error');
     } finally {
       setEditSaving(false);
     }
@@ -296,7 +338,7 @@ export default function QueuePage() {
   const now = new Date();
 
   const eligibleGroupCount = groups.filter(
-    (g) => g.items.every((i) => i.toNumber) && g.items.some((i) => i.status === 'pending' && new Date(i.chaseAfter) <= now)
+    (g) => g.items.every(isDialable) && g.items.some((i) => i.status === 'pending' && new Date(i.chaseAfter) <= now)
   ).length;
 
   const pendingCount = queueInvoices.length;
@@ -355,14 +397,14 @@ export default function QueuePage() {
             // Fuzzy-merged items from other DB groups are display-only.
             const primaryItems = g.items.filter((i) => i.groupKey === g.key);
             const primaryPending = primaryItems.filter((i) => i.status === 'pending');
-            const hasNoPhone = primaryPending.length > 0 && primaryPending.every((i) => !i.toNumber);
+            const hasNoPhone = primaryPending.length > 0 && primaryPending.every((i) => !isDialable(i));
             const earliestChaseAfter = g.items.reduce((min, i) => {
               const d = new Date(i.chaseAfter);
               return d < min ? d : min;
             }, new Date(8640000000000000));
 
             const eligibleNow =
-              !isCalling && primaryItems.some((i) => i.status === 'pending' && !!i.toNumber && new Date(i.chaseAfter) <= now);
+              !isCalling && primaryItems.some((i) => i.status === 'pending' && isDialable(i) && new Date(i.chaseAfter) <= now);
             const chaseInFuture = !isCalling && earliestChaseAfter > now;
 
             const isRetry = g.items.some((i) => i.status === 'pending' && i.attempts > 0);
@@ -538,6 +580,8 @@ export default function QueuePage() {
             onDispatch={handleQueueDispatch}
             dispatchLabel="Save & dispatch now"
             saving={editSaving}
+            masterNumber={editingInvoice.customerPhone ?? null}
+            allowSaveAsDefault={!!editingInvoice.customerId}
           />
         )}
       </Drawer>

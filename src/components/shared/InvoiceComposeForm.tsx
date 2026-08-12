@@ -14,13 +14,33 @@ import type { InvoiceParseResult, BulkFormState } from '@/lib/client-types';
 import { hasCallableNumber } from '@/lib/format';
 import { Button } from './Button';
 
+/** Extra intent flags the caller needs alongside the form state. */
+export interface InvoiceComposeSubmitOpts {
+  /** User asked for the typed number to also become the customer's master number. */
+  saveAsDefault: boolean;
+}
+
 export interface InvoiceComposeFormProps {
   initial: InvoiceParseResult;
   onCancel: () => void;
-  onSave?: (state: BulkFormState) => void | Promise<void>;
-  onDispatch: (state: BulkFormState) => void | Promise<void>;
+  onSave?: (state: BulkFormState, opts?: InvoiceComposeSubmitOpts) => void | Promise<void>;
+  onDispatch: (state: BulkFormState, opts?: InvoiceComposeSubmitOpts) => void | Promise<void>;
   dispatchLabel?: string;
   saving?: boolean;
+  /**
+   * The debtor Customer's master phone number, when known. Used as the fallback initial
+   * value and as the comparison for the "this call only" hint — a number typed here is
+   * request-scoped and is NOT persisted unless the user ticks "save as default".
+   */
+  masterNumber?: string | null;
+  /** Show the "also save as this customer's default number" checkbox (needs a customer). */
+  allowSaveAsDefault?: boolean;
+}
+
+// Compare two numbers by digits only, so "+61 413 727 809" and "+61413727809" match.
+function sameNumber(a: string | null | undefined, b: string | null | undefined): boolean {
+  const digits = (v: string | null | undefined) => (v ?? '').replace(/\D/g, '');
+  return digits(a) === digits(b);
 }
 
 type ParsedLineItem = {
@@ -47,11 +67,13 @@ export function InvoiceComposeForm({
   onDispatch,
   dispatchLabel = 'Dispatch call',
   saving = false,
+  masterNumber = null,
+  allowSaveAsDefault = false,
 }: InvoiceComposeFormProps) {
   const [contactBusiness, setContactBusiness] = useState(initial.contactBusiness ?? '');
   const [contactPerson, setContactPerson] = useState(initial.contactPerson ?? '');
   const [vendorName, setVendorName] = useState(initial.vendorName ?? '');
-  const [toNumber, setToNumber] = useState(initial.toNumber ?? '+61 ');
+  const [toNumber, setToNumber] = useState(initial.toNumber ?? masterNumber ?? '+61 ');
   const [invoiceNumber, setInvoiceNumber] = useState(initial.invoiceNumber ?? '');
   const [invoiceDate, setInvoiceDate] = useState(initial.invoiceDate ?? '');
   const [dueDate, setDueDate] = useState(initial.dueDate ?? '');
@@ -67,6 +89,8 @@ export function InvoiceComposeForm({
   const [remittanceName, setRemittanceName] = useState(initial.remittanceName ?? '');
   const [remittanceContact, setRemittanceContact] = useState(initial.remittanceContact ?? '');
 
+  const [saveAsDefault, setSaveAsDefault] = useState(false);
+
   const [dispatching, setDispatching] = useState(false);
   const [savingLocal, setSavingLocal] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -74,6 +98,14 @@ export function InvoiceComposeForm({
   const busy = saving || dispatching || savingLocal;
 
   const isValid = hasCallableNumber(toNumber) && !busy;
+
+  // The typed number only counts as an override once it actually differs from the master.
+  // `differsFromMaster` is also true when there is no master yet (a customer with no number
+  // on file) — that's precisely when offering to save one as the default is most useful.
+  const differsFromMaster = !sameNumber(toNumber, masterNumber);
+  const overridesMaster = !!masterNumber && differsFromMaster;
+  const showSaveAsDefault = allowSaveAsDefault && differsFromMaster && hasCallableNumber(toNumber);
+  const submitOpts = (): InvoiceComposeSubmitOpts => ({ saveAsDefault: showSaveAsDefault && saveAsDefault });
 
   const buildState = (): BulkFormState => ({
     contactBusiness: contactBusiness.trim(),
@@ -101,7 +133,7 @@ export function InvoiceComposeForm({
     setSaveError(null);
     setSavingLocal(true);
     try {
-      await onSave(buildState());
+      await onSave(buildState(), submitOpts());
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
@@ -114,7 +146,7 @@ export function InvoiceComposeForm({
     setDispatchError(null);
     setDispatching(true);
     try {
-      await onDispatch(buildState());
+      await onDispatch(buildState(), submitOpts());
     } catch (err) {
       setDispatchError(err instanceof Error ? err.message : 'Failed to dispatch');
     } finally {
@@ -138,6 +170,38 @@ export function InvoiceComposeForm({
               onChange={(e) => setToNumber(e.target.value)}
               placeholder="+61 4..."
             />
+            {masterNumber && (
+              <div className="mt-1.5 text-xs leading-relaxed">
+                {overridesMaster ? (
+                  <p className="text-slate-500">
+                    Customer default is <span className="font-mono text-slate-600">{masterNumber}</span>.{' '}
+                    <button
+                      type="button"
+                      onClick={() => setToNumber(masterNumber)}
+                      className="font-medium text-brand hover:text-brand-dark hover:underline"
+                    >
+                      Use default
+                    </button>
+                    <span className="block text-slate-400">
+                      This number is used for this call only — it is not saved to the invoice or the customer.
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-slate-400">Using this customer&rsquo;s default number.</p>
+                )}
+              </div>
+            )}
+            {showSaveAsDefault && (
+              <label className="mt-2 flex items-start gap-2 text-xs text-slate-600 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 accent-brand"
+                  checked={saveAsDefault}
+                  onChange={(e) => setSaveAsDefault(e.target.checked)}
+                />
+                <span>Also save as this customer&rsquo;s default number</span>
+              </label>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>

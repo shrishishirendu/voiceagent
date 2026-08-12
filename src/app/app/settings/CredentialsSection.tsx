@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Card, CardHeader, CardBody } from '@/components/shared/Card';
 import { Button } from '@/components/shared/Button';
 import { useAddToast } from '@/components/shared/Toast';
-import { IconPhone } from '@/components/shared/Icons';
+import { IconPhone, IconChevronDown } from '@/components/shared/Icons';
 
 type FieldStatus = { tenantSet: boolean; envFallback: boolean; masked: string | null };
 type CredentialField = 'vapiPrivateKey' | 'twilioAccountSid' | 'twilioAuthToken' | 'anthropicKey';
@@ -36,6 +36,7 @@ export function CredentialsSection() {
     anthropicKey: '',
   });
   const [saving, setSaving] = useState(false);
+  const [open, setOpen] = useState(false);
   const addToast = useAddToast();
 
   const load = useCallback(async () => {
@@ -93,10 +94,26 @@ export function CredentialsSection() {
 
   return (
     <Card>
-      <CardHeader className="flex items-center gap-2">
+      <CardHeader
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+        className="flex items-center gap-2 cursor-pointer select-none"
+      >
         <IconPhone className="w-4 h-4 text-slate-400" />
         <h2 className="text-sm font-semibold text-slate-900">Outbound credentials &amp; caller-id</h2>
+        <IconChevronDown
+          className={`w-4 h-4 text-slate-400 ml-auto transition-transform ${open ? 'rotate-180' : ''}`}
+        />
       </CardHeader>
+      {open && (
       <CardBody className="space-y-4">
         <p className="text-xs text-slate-500 -mt-1">
           Bring your own Vapi / Twilio / Anthropic keys and the phone number your agent calls from.
@@ -149,6 +166,7 @@ export function CredentialsSection() {
           </Button>
         </div>
       </CardBody>
+      )}
     </Card>
   );
 }

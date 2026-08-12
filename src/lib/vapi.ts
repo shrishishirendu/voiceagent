@@ -337,6 +337,8 @@ The example phrasings shown elsewhere in this prompt are in English — use Hind
 - If asked how they can pay (method name only, no details yet): "हम बैंक ट्रांसफ़र से भुगतान स्वीकार कर सकते हैं।"`
     : "";
 
+  const today = new Date();
+
   return `You are Envoy, a polite AI agent placing a phone call on behalf of ${userName}. You're calling ${contactBusiness}.${
     contactPerson
       ? ` If it becomes clear from the caller's response that they are not the right person and are asking who the call should go to (e.g. a gatekeeper or receptionist routing the call), ask to speak with ${contactPerson}. Do not volunteer ${contactPerson}'s name proactively or ask to be transferred in any other situation — if the caller is ready to talk, proceed directly to the call objective.`
@@ -364,7 +366,7 @@ ${MANNER_GUIDANCE[manner]}
     : `Speak monetary amounts as natural English words, never as digit strings. State the full precise amount when first raising it or when the contact explicitly asks what they owe (e.g. "seven thousand four hundred and ninety dollars and thirty-six cents"). In later references within the same conversation, you may use the shorthand a human would reach for (e.g. "about seventy-five hundred" or "just under seventy-five hundred dollars"). The guiding principle: the contact should always be able to walk away knowing the exact amount — so if they ask directly, always give the precise figure in full.`}
 
 # Date context
-Today is ${new Date().toISOString().split("T")[0]}. When an invoice is overdue (its due date is before today), acknowledge it is overdue and focus on arranging a future payment date. All suggested settlement dates or payment plan start dates must be after today.
+Today is ${today.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" })}, ${today.toISOString().split("T")[0]}. When an invoice is overdue (its due date is before today), acknowledge it is overdue and focus on arranging a future payment date. All suggested settlement dates or payment plan start dates must be after today.
 
 # Ending the call
 When the objective is resolved (success OR a clear no), say a natural farewell (e.g. "Great, I'll let you go — goodbye!") then immediately use the endCall function to hang up. Don't wait for the other person to hang up first. Don't drag it out.

@@ -143,7 +143,7 @@ export default function SettingsPage() {
         </Button>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+      <div className="flex-1 overflow-y-auto px-6 pt-6 pb-24 space-y-6">
         {/* Scheduler */}
         <Card>
           <CardHeader className="flex items-center gap-2">
@@ -255,6 +255,7 @@ export default function SettingsPage() {
                 className="input"
                 value={settings.dueOffsetDays}
                 onChange={(e) => update('dueOffsetDays', Number(e.target.value))}
+                onWheel={(e) => e.currentTarget.blur()}
               />
               <p className="text-xs text-slate-500 mt-1.5">0 = start chasing on the due date. Negative values remind before it&apos;s due.</p>
             </div>
@@ -321,6 +322,7 @@ export default function SettingsPage() {
                 disabled={!settings.autoRetry}
                 value={settings.retryDelayHours}
                 onChange={(e) => update('retryDelayHours', Number(e.target.value))}
+                onWheel={(e) => e.currentTarget.blur()}
               />
               <p className="text-xs text-slate-500 mt-1.5">Hours before a no-answer or failed call is retried. Max 168 (1 week).</p>
             </div>

@@ -66,6 +66,19 @@ export type DispatchConfig = {
   publicUrl: string
 }
 
+// The public base URL Vapi posts its webhooks back to. An explicit PUBLIC_URL always wins
+// (that's the ngrok tunnel locally, or the stable domain in production); otherwise fall back
+// to the URL Vercel injects for the current deployment, so a Preview deployment works without
+// anyone remembering to set a per-branch env var. NOT a per-tenant credential — this is pure
+// env resolution and never touches Tenant.credentials.
+export function resolvePublicUrl(): string {
+  const explicit = (process.env.PUBLIC_URL ?? '').trim()
+  if (explicit) return explicit.replace(/\/+$/, '')
+  const vercelHost = (process.env.VERCEL_BRANCH_URL || process.env.VERCEL_URL || '').trim()
+  if (vercelHost) return `https://${vercelHost.replace(/\/+$/, '')}`
+  return ''
+}
+
 // Effective outbound config for a tenant: decrypted per-tenant overrides where present,
 // otherwise the process env. Returns which fields are still missing so the dispatcher can
 // bail with a clear message instead of a failed Vapi call.
@@ -81,7 +94,7 @@ export async function resolveDispatchConfig(
     twilioAuthToken: pick('twilioAuthToken', process.env.TWILIO_AUTH_TOKEN),
     twilioPhoneNumber: phoneNumber || process.env.TWILIO_PHONE_NUMBER || '',
     anthropicKey: pick('anthropicKey', process.env.ANTHROPIC_API_KEY),
-    publicUrl: process.env.PUBLIC_URL || '',
+    publicUrl: resolvePublicUrl(),
   }
 
   const missing: string[] = []

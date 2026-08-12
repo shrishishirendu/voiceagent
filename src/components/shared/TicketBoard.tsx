@@ -60,13 +60,13 @@ export function TicketBoard({ tickets, onOpen }: { tickets: BoardTicket[]; onOpe
       {LANES.map((lane) => {
         const laneTickets = tickets.filter((t) => lane.statuses.includes(t.derivedStatus));
         return (
-          <div key={lane.id} className={`rounded-2xl ${lane.colBg} p-3 min-h-[120px]`}>
-            <div className="flex items-center gap-2 px-1 pb-3">
+          <div key={lane.id} className={`rounded-2xl ${lane.colBg} p-3 min-h-[120px] max-h-[700px] flex flex-col`}>
+            <div className="flex-none flex items-center gap-2 px-1 pb-3">
               <span className={`w-2 h-2 rounded-full ${lane.dot}`} />
               <span className="text-sm font-semibold text-slate-700">{lane.label}</span>
               <span className={`ml-auto text-[11px] font-mono px-1.5 py-0.5 rounded-full ${lane.countCls}`}>{laneTickets.length}</span>
             </div>
-            <div className="space-y-2.5">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain scrollbar-hide space-y-2.5 pr-1">
               {laneTickets.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-10 gap-2">
                   <span className="text-slate-300 text-lg leading-none">○</span>
